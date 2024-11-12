@@ -62,13 +62,13 @@ blueprint:
       default: 0
     no_motion_wait:
       name: Turn Off Delay
-      description: "Minutes to wait before turning off after no motion/door activity"
+      description: "Seconds to wait before turning off after no motion/door activity"
       selector:
         number:
           min: 0
-          max: 120
-          unit_of_measurement: minutes
-      default: 5
+          max: 600
+          unit_of_measurement: seconds
+      default: 120
     late_night_wait:
       name: Late Night Turn Off Delay
       description: "Optional shorter delay for late night (leave at 0 to disable)"
@@ -76,8 +76,8 @@ blueprint:
         number:
           min: 0
           max: 120
-          unit_of_measurement: minutes
-      default: 0
+          unit_of_measurement: seconds
+      default: 30
     late_night_start:
       name: Late Night Start Time
       description: "When to start using late night delay (if enabled)"
