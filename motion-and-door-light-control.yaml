@@ -137,42 +137,48 @@ trigger:
 
 variables:
   timer_name: "{{ this.entity_id.split('.')[1] }}_timer"
-  is_motion_active: >
+  is_motion_active: >-
+    {% set motion_active = false %}
     {% set motion_states = expand(input.motion_sensors) | map(attribute='state') | list %}
     {% for state in motion_states %}
       {% if state == 'on' %}
-        {% return true %}
+        {% set motion_active = true %}
       {% endif %}
     {% endfor %}
-    {% return false %}
-  is_door_active: >
+    {{ motion_active }}
+  is_door_active: >-
+    {% set door_active = false %}
     {% if input.door_sensors %}
       {% set door_states = expand(input.door_sensors) | map(attribute='state') | list %}
       {% for state in door_states %}
         {% if state == 'on' %}
-          {% return true %}
+          {% set door_active = true %}
         {% endif %}
       {% endfor %}
     {% endif %}
-    {% return false %}
-  current_delay: >
+    {{ door_active }}
+  current_delay: >-
     {% if input.late_night_wait > 0 %}
       {% set now = now() %}
       {% set start = strptime(input.late_night_start, '%H:%M:%S').time() %}
       {% set end = strptime(input.late_night_end, '%H:%M:%S').time() %}
       {% if now.time() >= start or now.time() < end %}
-        {% return input.late_night_wait %}
+        {{ input.late_night_wait }}
+      {% else %}
+        {{ input.no_motion_wait }}
       {% endif %}
+    {% else %}
+      {{ input.no_motion_wait }}
     {% endif %}
-    {% return input.no_motion_wait %}
-  should_use_transition: >
+  should_use_transition: >-
+    {% set use_transition = true %}
     {% set entities = expand(input.controlled_entities) %}
     {% for entity in entities %}
       {% if entity.domain == 'scene' %}
-        {% return false %}
+        {% set use_transition = false %}
       {% endif %}
     {% endfor %}
-    {% return true %}
+    {{ use_transition }}
 
 action:
   # Debug logging
