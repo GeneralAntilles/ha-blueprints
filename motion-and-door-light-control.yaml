@@ -1,0 +1,328 @@
+# Blueprint metadata
+blueprint:
+  name: "Advanced Motion and Door Lighting Control"
+  description: "Control lights based on motion and door sensors with sun-based schedule, override switches, and optional features like late night mode and debug logging"
+  domain: automation
+  source_url: "https://gist.github.com/anonymous/your-gist-will-have-a-different-url"
+  input:
+    motion_sensors:
+      name: Motion Sensors
+      description: "Select one or more motion sensors"
+      selector:
+        target:
+          entity:
+            domain: binary_sensor
+            device_class: motion
+    door_sensors:
+      name: Door Sensors
+      description: "Optional door sensors that will also trigger lights"
+      selector:
+        target:
+          entity:
+            domain: binary_sensor
+            device_class: door
+      default: []
+      required: false
+    controlled_entities:
+      name: Controlled Entities
+      description: "Lights or scenes to be controlled"
+      selector:
+        target:
+          entity:
+            domain:
+              - light
+              - scene
+              - switch
+    override_input_boolean:
+      name: Override Switch
+      description: "Input boolean to disable motion/door control"
+      selector:
+        entity:
+          domain: input_boolean
+    debug_mode:
+      name: Debug Mode
+      description: "Enable debug logging"
+      selector:
+        boolean:
+      default: false
+    sunset_offset:
+      name: Sunset Offset
+      description: "Minutes to offset from sunset (negative = earlier)"
+      selector:
+        number:
+          min: -120
+          max: 120
+          unit_of_measurement: minutes
+      default: 0
+    sunrise_offset:
+      name: Sunrise Offset
+      description: "Minutes to offset from sunrise (positive = later)"
+      selector:
+        number:
+          min: -120
+          max: 120
+          unit_of_measurement: minutes
+      default: 0
+    no_motion_wait:
+      name: Turn Off Delay
+      description: "Minutes to wait before turning off after no motion/door activity"
+      selector:
+        number:
+          min: 0
+          max: 120
+          unit_of_measurement: minutes
+      default: 5
+    late_night_wait:
+      name: Late Night Turn Off Delay
+      description: "Optional shorter delay for late night (leave at 0 to disable)"
+      selector:
+        number:
+          min: 0
+          max: 120
+          unit_of_measurement: minutes
+      default: 0
+    late_night_start:
+      name: Late Night Start Time
+      description: "When to start using late night delay (if enabled)"
+      selector:
+        time:
+      default: "23:00:00"
+    late_night_end:
+      name: Late Night End Time
+      description: "When to stop using late night delay (if enabled)"
+      selector:
+        time:
+      default: "05:00:00"
+    turn_on_transition:
+      name: Turn On Transition
+      description: "Transition time in seconds when turning on (ignored for scenes)"
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: seconds
+      default: 1
+    turn_off_transition:
+      name: Turn Off Transition
+      description: "Transition time in seconds when turning off (ignored for scenes)"
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: seconds
+      default: 2
+
+# Automation config
+trigger:
+  - platform: state
+    entity_id: !input motion_sensors
+    to: "on"
+    id: "motion_on"
+  - platform: state
+    entity_id: !input motion_sensors
+    to: "off"
+    id: "motion_off"
+  - platform: state
+    entity_id: !input door_sensors
+    to: "on"
+    id: "door_on"
+  - platform: state
+    entity_id: !input door_sensors
+    to: "off"
+    id: "door_off"
+  - platform: state
+    entity_id: !input override_input_boolean
+    to: "on"
+    id: "override_on"
+  - platform: homeassistant
+    event: start
+    id: "ha_start"
+
+variables:
+  timer_name: "{{ this.entity_id.split('.')[1] }}_timer"
+  is_motion_active: >
+    {% set motion_states = expand(input.motion_sensors) | map(attribute='state') | list %}
+    {% for state in motion_states %}
+      {% if state == 'on' %}
+        {% return true %}
+      {% endif %}
+    {% endfor %}
+    {% return false %}
+  is_door_active: >
+    {% if input.door_sensors %}
+      {% set door_states = expand(input.door_sensors) | map(attribute='state') | list %}
+      {% for state in door_states %}
+        {% if state == 'on' %}
+          {% return true %}
+        {% endif %}
+      {% endfor %}
+    {% endif %}
+    {% return false %}
+  current_delay: >
+    {% if input.late_night_wait > 0 %}
+      {% set now = now() %}
+      {% set start = strptime(input.late_night_start, '%H:%M:%S').time() %}
+      {% set end = strptime(input.late_night_end, '%H:%M:%S').time() %}
+      {% if now.time() >= start or now.time() < end %}
+        {% return input.late_night_wait %}
+      {% endif %}
+    {% endif %}
+    {% return input.no_motion_wait %}
+  should_use_transition: >
+    {% set entities = expand(input.controlled_entities) %}
+    {% for entity in entities %}
+      {% if entity.domain == 'scene' %}
+        {% return false %}
+      {% endif %}
+    {% endfor %}
+    {% return true %}
+
+action:
+  # Debug logging
+  - if:
+      - condition: template
+        value_template: "{{ input.debug_mode }}"
+    then:
+      - service: system_log.write
+        data:
+          message: "Motion Light Debug - Trigger: {{ trigger.id }}, Motion Active: {{ is_motion_active }}, Door Active: {{ is_door_active }}"
+          level: debug
+
+  # Handle HA startup
+  - if:
+      - condition: trigger
+        id: "ha_start"
+      - condition: template
+        value_template: >
+          {% set override_state = states(input.override_input_boolean) %}
+          {{ override_state == 'off' }}
+      - condition: template
+        value_template: "{{ not is_motion_active and not is_door_active }}"
+    then:
+      - service: homeassistant.turn_off
+        target: !input controlled_entities
+        data:
+          transition: "{{ turn_off_transition if should_use_transition else 0 }}"
+    continue: false
+
+  # Handle override being turned on
+  - choose:
+      - conditions:
+          - condition: trigger
+            id: "override_on"
+        sequence:
+          - service: timer.cancel
+            data:
+              entity_id: "timer.{{ timer_name }}"
+            continue_on_error: true
+
+  # Check override state
+  - condition: template
+    value_template: >
+      {% set override_state = states(input.override_input_boolean) %}
+      {{ override_state == 'off' }}
+
+  # Sun position check
+  - condition: or
+    conditions:
+      - condition: sun
+        after: sunset
+        after_offset: "{{ '%+d' % (input.sunset_offset|int) if input.sunset_offset >= 0 else '%d' % input.sunset_offset }} minutes"
+      - condition: sun
+        before: sunrise
+        before_offset: "{{ '%+d' % (input.sunrise_offset|int) if input.sunrise_offset >= 0 else '%d' % input.sunrise_offset }} minutes"
+
+  # Main action logic
+  - choose:
+      # Handle motion/door ON triggers
+      - conditions:
+          - condition: or
+            conditions:
+              - condition: trigger
+                id: "motion_on"
+              - condition: trigger
+                id: "door_on"
+          - condition: state
+            entity_id: !input controlled_entities
+            state: "off"
+        sequence:
+          - service: homeassistant.turn_on
+            target: !input controlled_entities
+            data:
+              transition: "{{ input.turn_on_transition if should_use_transition else 0 }}"
+
+      # Handle motion OFF trigger
+      - conditions:
+          - condition: trigger
+            id: "motion_off"
+          - condition: state
+            entity_id: !input controlled_entities
+            state: "on"
+          # Only start timer if no door is active
+          - condition: template
+            value_template: "{{ not is_door_active }}"
+        sequence:
+          - service: timer.cancel
+            data:
+              entity_id: "timer.{{ timer_name }}"
+            continue_on_error: true
+          - service: timer.create
+            data:
+              name: "{{ timer_name }}"
+              duration: "{{ 'PT%dM' % (current_delay|int) }}"
+          - wait_for_trigger:
+              - platform: event
+                event_type: timer.finished
+                event_data:
+                  entity_id: "timer.{{ timer_name }}"
+              - platform: state
+                entity_id: !input motion_sensors
+                to: "on"
+              - platform: state
+                entity_id: !input door_sensors
+                to: "on"
+          # Double check nothing is active before turning off
+          - condition: template
+            value_template: "{{ not is_motion_active and not is_door_active }}"
+          - service: homeassistant.turn_off
+            target: !input controlled_entities
+            data:
+              transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
+
+      # Handle door OFF trigger
+      - conditions:
+          - condition: trigger
+            id: "door_off"
+          - condition: state
+            entity_id: !input controlled_entities
+            state: "on"
+          # Only start timer if no motion is active
+          - condition: template
+            value_template: "{{ not is_motion_active }}"
+        sequence:
+          - service: timer.cancel
+            data:
+              entity_id: "timer.{{ timer_name }}"
+            continue_on_error: true
+          - service: timer.create
+            data:
+              name: "{{ timer_name }}"
+              duration: "{{ 'PT%dM' % (current_delay|int) }}"
+          - wait_for_trigger:
+              - platform: event
+                event_type: timer.finished
+                event_data:
+                  entity_id: "timer.{{ timer_name }}"
+              - platform: state
+                entity_id: !input motion_sensors
+                to: "on"
+              - platform: state
+                entity_id: !input door_sensors
+                to: "on"
+          # Double check nothing is active before turning off
+          - condition: template
+            value_template: "{{ not is_motion_active and not is_door_active }}"
+          - service: homeassistant.turn_off
+            target: !input controlled_entities
+            data:
+              transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
