@@ -1,27 +1,17 @@
-# Blueprint metadata
 blueprint:
   name: "Advanced Motion and Door Lighting Control"
-  description: "Control lights based on motion and door sensors with sun-based schedule, override switches, and optional features like late night mode and debug logging"
+  description: "Control lights based on motion and door sensors with sun-based schedule and override switches"
   domain: automation
-  source_url: "https://gist.github.com/anonymous/your-gist-will-have-a-different-url"
   input:
-    motion_sensors:
-      name: Motion Sensors
-      description: "Select one or more motion sensors"
+    door_sensors:
+      name: Door Sensors
+      description: "Optional door sensors that will also trigger lights"
       selector:
         target:
           entity:
             domain: binary_sensor
-            device_class: motion
-  door_sensors:
-    name: Door Sensors
-    description: "Optional door sensors that will also trigger lights"
-    selector:
-      target:
-        entity:
-          domain: binary_sensor
-          device_class: door
-    default: []
+            device_class: door
+      default: []
     controlled_entities:
       name: Controlled Entities
       description: "Lights or scenes to be controlled"
