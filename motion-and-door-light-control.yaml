@@ -3,6 +3,14 @@ blueprint:
   description: "Control lights based on motion and door sensors with sun-based schedule and override switches"
   domain: automation
   input:
+    motion_sensors:
+      name: Motion Sensors
+      description: "Select one or more motion sensors"
+      selector:
+        target:
+          entity:
+            domain: binary_sensor
+            device_class: motion
     door_sensors:
       name: Door Sensors
       description: "Optional door sensors that will also trigger lights"
