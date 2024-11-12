@@ -13,16 +13,15 @@ blueprint:
           entity:
             domain: binary_sensor
             device_class: motion
-    door_sensors:
-      name: Door Sensors
-      description: "Optional door sensors that will also trigger lights"
-      selector:
-        target:
-          entity:
-            domain: binary_sensor
-            device_class: door
-      default: []
-      required: false
+  door_sensors:
+    name: Door Sensors
+    description: "Optional door sensors that will also trigger lights"
+    selector:
+      target:
+        entity:
+          domain: binary_sensor
+          device_class: door
+    default: []
     controlled_entities:
       name: Controlled Entities
       description: "Lights or scenes to be controlled"
