@@ -206,7 +206,7 @@ action:
         target: !input controlled_entities
         data:
           transition: "{{ turn_off_transition if should_use_transition else 0 }}"
-    continue: false
+    continue_on_error: false
 
   # Handle override being turned on
   - choose:
