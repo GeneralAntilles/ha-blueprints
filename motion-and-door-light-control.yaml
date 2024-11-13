@@ -124,7 +124,7 @@ trigger:
     id: "ha_start"
 
 variables:
-  timer_name: "{{ this.entity_id.split('.')[1] }}_timer"
+  timer_name: "motion_light_timer"
   is_motion_active: >-
     {% set motion_active = false %}
     {% set motion_states = expand(input.motion_sensors) | map(attribute='state') | list %}
@@ -255,17 +255,17 @@ action:
         sequence:
           - service: timer.cancel
             data:
-              entity_id: "timer.{{ timer_name }}"
+              entity_id: "timer.motion_light_timer"
             continue_on_error: true
           - service: timer.create
             data:
-              name: "{{ timer_name }}"
+              name: "motion_light_timer"
               duration: "{{ 'PT%dS' | format(current_delay|int) }}"
           - wait_for_trigger:
               - platform: event
                 event_type: timer.finished
                 event_data:
-                  entity_id: "timer.{{ timer_name }}"
+                  entity_id: "timer.motion_light_timer"
               - platform: state
                 entity_id: !input motion_sensors
                 to: "on"
