@@ -1,6 +1,6 @@
 blueprint:
-  name: "Advanced Motion and Door Lighting Control"
-  description: "Control lights based on motion and door sensors with sun-based schedule and override switches"
+  name: "Advanced Motion and Door Lighting Control with Late Night Mode"
+  description: "Control lights based on motion and door sensors with sun-based schedule, late night options, and override switches"
   domain: automation
   input:
     motion_sensors:
@@ -57,6 +57,34 @@ blueprint:
           max: 3600
           unit_of_measurement: seconds
       default: 300
+    late_night_start:
+      name: Late Night Start Time
+      description: "Time to start using late night settings (e.g., '22:00')"
+      selector:
+        time:
+    late_night_end:
+      name: Late Night End Time
+      description: "Time to end late night settings (e.g., '06:00')"
+      selector:
+        time:
+    late_night_brightness:
+      name: Late Night Brightness
+      description: "Brightness level during late night hours (1-100)"
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+      default: 30
+    late_night_wait:
+      name: Late Night Turn Off Delay
+      description: "Seconds to wait before turning off during late night hours"
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
+      default: 120
     turn_on_transition:
       name: Turn On Transition
       description: "Transition time in seconds when turning on (ignored for scenes)"
@@ -99,7 +127,23 @@ trigger:
 
 variables:
   timer_name: "motion_light_timer"
-  current_delay: !input no_motion_wait
+  current_time: >-
+    {{ now().strftime("%H:%M") }}
+  is_late_night: >-
+    {% set current = now().strftime("%H:%M") %}
+    {% set start = input.late_night_start %}
+    {% set end = input.late_night_end %}
+    {% if start <= end %}
+      {{ current >= start and current < end }}
+    {% else %}
+      {{ current >= start or current < end }}
+    {% endif %}
+  current_delay: >-
+    {% if is_late_night %}
+      {{ input.late_night_wait }}
+    {% else %}
+      {{ input.no_motion_wait }}
+    {% endif %}
   is_motion_active: >-
     {% set motion_active = false %}
     {% for sensor in input.motion_sensors %}
@@ -143,7 +187,7 @@ action:
     then:
       - service: system_log.write
         data:
-          message: "Motion Light Debug - Trigger: {{ trigger.id }}, Motion Active: {{ is_motion_active }}, Door Active: {{ is_door_active }}"
+          message: "Motion Light Debug - Trigger: {{ trigger.id }}, Motion Active: {{ is_motion_active }}, Door Active: {{ is_door_active }}, Late Night: {{ is_late_night }}"
           level: debug
 
   # Handle HA startup
@@ -169,8 +213,14 @@ action:
       {{ override_state == 'off' }}
 
   # Sun check
-  - condition: template
-    value_template: "{{ states(input.sun_entity) == 'below_horizon' }}"
+  - condition: or
+    conditions:
+      - condition: state
+        entity_id: !input sun_entity
+        state: "below_horizon"
+      - condition: state
+        entity_id: !input sun_entity
+        state: "night"
 
   # Main action logic
   - choose:
@@ -189,6 +239,7 @@ action:
             target: !input controlled_entities
             data:
               transition: "{{ input.turn_on_transition if should_use_transition else 0 }}"
+              brightness_pct: "{{ input.late_night_brightness if is_late_night else 100 }}"
 
       # Handle motion OFF trigger
       - conditions:
