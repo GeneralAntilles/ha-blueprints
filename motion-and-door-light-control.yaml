@@ -1,6 +1,6 @@
 blueprint:
   name: "Advanced Motion and Door Lighting Control"
-  description: "Control lights based on motion and door sensors with sun-based schedule, override switches, and optional debug mode"
+  description: "Control lights based on motion and door sensors with sun-based schedule and override switches"
   domain: automation
   input:
     motion_sensors:
@@ -57,28 +57,7 @@ blueprint:
           min: 0
           max: 3600
           unit_of_measurement: seconds
-      default: 180
-    late_night_wait:
-      name: Late Night Turn Off Delay
-      description: "Optional shorter delay for late night (seconds, 0 to disable)"
-      selector:
-        number:
-          min: 0
-          max: 3600
-          unit_of_measurement: seconds
-      default: 30
-    late_night_start:
-      name: Late Night Start Time
-      description: "When to start using late night delay (if enabled)"
-      selector:
-        time:
-      default: "23:00:00"
-    late_night_end:
-      name: Late Night End Time
-      description: "When to stop using late night delay (if enabled)"
-      selector:
-        time:
-      default: "05:00:00"
+      default: 300
     turn_on_transition:
       name: Turn On Transition
       description: "Transition time in seconds when turning on (ignored for scenes)"
@@ -115,10 +94,6 @@ trigger:
     entity_id: !input door_sensors
     to: "off"
     id: "door_off"
-  - platform: state
-    entity_id: !input override_input_boolean
-    to: "on"
-    id: "override_on"
   - platform: homeassistant
     event: start
     id: "ha_start"
@@ -145,19 +120,6 @@ variables:
       {% endfor %}
     {% endif %}
     {{ door_active }}
-  current_delay: >-
-    {% if input.late_night_wait > 0 %}
-      {% set now = now() %}
-      {% set start = strptime(input.late_night_start, '%H:%M:%S').time() %}
-      {% set end = strptime(input.late_night_end, '%H:%M:%S').time() %}
-      {% if now.time() >= start or now.time() < end %}
-        {{ input.late_night_wait }}
-      {% else %}
-        {{ input.no_motion_wait }}
-      {% endif %}
-    {% else %}
-      {{ input.no_motion_wait }}
-    {% endif %}
   any_entity_on: >-
     {% set entities = expand(input.controlled_entities) %}
     {% for entity in entities %}
@@ -202,18 +164,6 @@ action:
         target: !input controlled_entities
         data:
           transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
-    continue_on_error: true
-
-  # Handle override being turned on
-  - choose:
-      - conditions:
-          - condition: trigger
-            id: "override_on"
-        sequence:
-          - service: timer.cancel
-            data:
-              entity_id: "timer.{{ timer_name }}"
-            continue_on_error: true
 
   # Check override state
   - condition: template
@@ -253,25 +203,8 @@ action:
           - condition: template
             value_template: "{{ not is_door_active }}"
         sequence:
-          - service: timer.cancel
-            data:
-              entity_id: "timer.motion_light_timer"
-            continue_on_error: true
-          - service: timer.create
-            data:
-              name: "motion_light_timer"
-              duration: "{{ 'PT%dS' | format(current_delay|int) }}"
-          - wait_for_trigger:
-              - platform: event
-                event_type: timer.finished
-                event_data:
-                  entity_id: "timer.motion_light_timer"
-              - platform: state
-                entity_id: !input motion_sensors
-                to: "on"
-              - platform: state
-                entity_id: !input door_sensors
-                to: "on"
+          - delay:
+              seconds: "{{ current_delay }}"
           # Double check nothing is active before turning off
           - condition: template
             value_template: "{{ not is_motion_active and not is_door_active }}"
@@ -290,25 +223,8 @@ action:
           - condition: template
             value_template: "{{ not is_motion_active }}"
         sequence:
-          - service: timer.cancel
-            data:
-              entity_id: "timer.{{ timer_name }}"
-            continue_on_error: true
-          - service: timer.create
-            data:
-              name: "{{ timer_name }}"
-              duration: "{{ 'PT%dS' | format(current_delay|int) }}"
-          - wait_for_trigger:
-              - platform: event
-                event_type: timer.finished
-                event_data:
-                  entity_id: "timer.{{ timer_name }}"
-              - platform: state
-                entity_id: !input motion_sensors
-                to: "on"
-              - platform: state
-                entity_id: !input door_sensors
-                to: "on"
+          - delay:
+              seconds: "{{ current_delay }}"
           # Double check nothing is active before turning off
           - condition: template
             value_template: "{{ not is_motion_active and not is_door_active }}"
