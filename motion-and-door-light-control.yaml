@@ -137,6 +137,24 @@ trigger:
 
 variables:
   timer_name: "{{ this.entity_id.split('.')[1] }}_timer"
+  sunset_offset_time: >-
+    {% set minutes = input.sunset_offset|int %}
+    {% set hours = (minutes / 60)|int %}
+    {% set remaining_minutes = minutes % 60 %}
+    {% if minutes >= 0 %}
+      {{ '%02d:%02d:00' | format(hours, remaining_minutes) }}
+    {% else %}
+      {{ '-%02d:%02d:00' | format(-hours, -remaining_minutes) }}
+    {% endif %}
+  sunrise_offset_time: >-
+    {% set minutes = input.sunrise_offset|int %}
+    {% set hours = (minutes / 60)|int %}
+    {% set remaining_minutes = minutes % 60 %}
+    {% if minutes >= 0 %}
+      {{ '%02d:%02d:00' | format(hours, remaining_minutes) }}
+    {% else %}
+      {{ '-%02d:%02d:00' | format(-hours, -remaining_minutes) }}
+    {% endif %}
   is_motion_active: >-
     {% set motion_active = false %}
     {% set motion_states = expand(input.motion_sensors) | map(attribute='state') | list %}
@@ -230,18 +248,10 @@ action:
     conditions:
       - condition: sun
         after: sunset
-        after_offset: >-
-          {% set minutes = input.sunset_offset|int %}
-          {% set hours = (minutes / 60)|int %}
-          {% set remaining_minutes = minutes % 60 %}
-          {{ '%02d:%02d:00' | format(hours, remaining_minutes) }}
+        after_offset: "{{ sunset_offset_time }}"
       - condition: sun
         before: sunrise
-        before_offset: >-
-          {% set minutes = input.sunrise_offset|int %}
-          {% set hours = (minutes / 60)|int %}
-          {% set remaining_minutes = minutes % 60 %}
-          {{ '%02d:%02d:00' | format(hours, remaining_minutes) }}
+        before_offset: "{{ sunrise_offset_time }}"
   # Main action logic
   - choose:
       # Handle motion/door ON triggers
