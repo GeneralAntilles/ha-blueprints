@@ -222,9 +222,8 @@ action:
       {{ override_state == 'off' }}
 
   # Sun check
-  - condition: state
-    entity_id: !input sun_entity
-    state: 'below_horizon'
+  - condition: template
+    value_template: "{{ states(input.sun_entity) == 'below_horizon' }}"
 
   # Main action logic
   - choose:
