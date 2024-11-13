@@ -1,6 +1,6 @@
 blueprint:
   name: "Advanced Motion and Door Lighting Control"
-  description: "Control lights based on motion and door sensors with sun-based schedule and override switches"
+  description: "Control lights based on motion and door sensors with sun-based schedule, override switches, and optional debug mode"
   domain: automation
   input:
     motion_sensors:
@@ -36,6 +36,13 @@ blueprint:
       selector:
         entity:
           domain: input_boolean
+    sun_entity:
+      name: Sun Entity
+      description: "Entity to check for day/night"
+      selector:
+        entity:
+          domain: sun
+      default: sun.sun
     debug_mode:
       name: Debug Mode
       description: "Enable debug logging"
@@ -48,16 +55,16 @@ blueprint:
       selector:
         number:
           min: 0
-          max: 600
+          max: 3600
           unit_of_measurement: seconds
-      default: 120
+      default: 180
     late_night_wait:
       name: Late Night Turn Off Delay
-      description: "Optional shorter delay for late night (leave at 0 to disable)"
+      description: "Optional shorter delay for late night (seconds, 0 to disable)"
       selector:
         number:
           min: 0
-          max: 120
+          max: 3600
           unit_of_measurement: seconds
       default: 30
     late_night_start:
@@ -91,7 +98,6 @@ blueprint:
           unit_of_measurement: seconds
       default: 2
 
-# Automation config
 trigger:
   - platform: state
     entity_id: !input motion_sensors
@@ -152,6 +158,14 @@ variables:
     {% else %}
       {{ input.no_motion_wait }}
     {% endif %}
+  any_entity_on: >-
+    {% set entities = expand(input.controlled_entities) %}
+    {% for entity in entities %}
+      {% if entity.state == 'on' %}
+        {% set ns.found = true %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.found | default(false) }}
   should_use_transition: >-
     {% set use_transition = true %}
     {% set entities = expand(input.controlled_entities) %}
@@ -187,8 +201,8 @@ action:
       - service: homeassistant.turn_off
         target: !input controlled_entities
         data:
-          transition: "{{ turn_off_transition if should_use_transition else 0 }}"
-    continue_on_error: false
+          transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
+    continue_on_error: true
 
   # Handle override being turned on
   - choose:
@@ -207,10 +221,11 @@ action:
       {% set override_state = states(input.override_input_boolean) %}
       {{ override_state == 'off' }}
 
-  # Sun position check
+  # Sun check
   - condition: state
-    entity_id: sun.sun
+    entity_id: !input sun_entity
     state: 'below_horizon'
+
   # Main action logic
   - choose:
       # Handle motion/door ON triggers
@@ -221,9 +236,8 @@ action:
                 id: "motion_on"
               - condition: trigger
                 id: "door_on"
-          - condition: state
-            entity_id: !input controlled_entities
-            state: "off"
+          - condition: template
+            value_template: "{{ not any_entity_on }}"
         sequence:
           - service: homeassistant.turn_on
             target: !input controlled_entities
@@ -234,9 +248,8 @@ action:
       - conditions:
           - condition: trigger
             id: "motion_off"
-          - condition: state
-            entity_id: !input controlled_entities
-            state: "on"
+          - condition: template
+            value_template: "{{ any_entity_on }}"
           # Only start timer if no door is active
           - condition: template
             value_template: "{{ not is_door_active }}"
@@ -248,7 +261,7 @@ action:
           - service: timer.create
             data:
               name: "{{ timer_name }}"
-              duration: "{{ 'PT%dM' % (current_delay|int) }}"
+              duration: "{{ 'PT%dS' | format(current_delay|int) }}"
           - wait_for_trigger:
               - platform: event
                 event_type: timer.finished
@@ -272,9 +285,8 @@ action:
       - conditions:
           - condition: trigger
             id: "door_off"
-          - condition: state
-            entity_id: !input controlled_entities
-            state: "on"
+          - condition: template
+            value_template: "{{ any_entity_on }}"
           # Only start timer if no motion is active
           - condition: template
             value_template: "{{ not is_motion_active }}"
@@ -286,7 +298,7 @@ action:
           - service: timer.create
             data:
               name: "{{ timer_name }}"
-              duration: "{{ 'PT%dM' % (current_delay|int) }}"
+              duration: "{{ 'PT%dS' | format(current_delay|int) }}"
           - wait_for_trigger:
               - platform: event
                 event_type: timer.finished
