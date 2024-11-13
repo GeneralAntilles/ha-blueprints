@@ -7,19 +7,18 @@ blueprint:
       name: Motion Sensors
       description: "Select one or more motion sensors"
       selector:
-        target:
-          entity:
-            domain: binary_sensor
-            device_class: motion
+        entity:
+          domain: binary_sensor
+          device_class: motion
+          multiple: true
     door_sensors:
       name: Door Sensors
       description: "Optional door sensors that will also trigger lights"
       selector:
-        target:
-          entity:
-            domain: binary_sensor
-            device_class: door
-      default: []
+        entity:
+          domain: binary_sensor
+          device_class: door
+          multiple: true
     controlled_entities:
       name: Controlled Entities
       description: "Lights or scenes to be controlled"
@@ -100,11 +99,11 @@ trigger:
 
 variables:
   timer_name: "motion_light_timer"
+  current_delay: !input no_motion_wait
   is_motion_active: >-
     {% set motion_active = false %}
-    {% set motion_states = expand(input.motion_sensors) | map(attribute='state') | list %}
-    {% for state in motion_states %}
-      {% if state == 'on' %}
+    {% for sensor in input.motion_sensors %}
+      {% if states(sensor) == 'on' %}
         {% set motion_active = true %}
       {% endif %}
     {% endfor %}
@@ -112,27 +111,25 @@ variables:
   is_door_active: >-
     {% set door_active = false %}
     {% if input.door_sensors %}
-      {% set door_states = expand(input.door_sensors) | map(attribute='state') | list %}
-      {% for state in door_states %}
-        {% if state == 'on' %}
+      {% for sensor in input.door_sensors %}
+        {% if states(sensor) == 'on' %}
           {% set door_active = true %}
         {% endif %}
       {% endfor %}
     {% endif %}
     {{ door_active }}
   any_entity_on: >-
-    {% set entities = expand(input.controlled_entities) %}
-    {% for entity in entities %}
-      {% if entity.state == 'on' %}
-        {% set ns.found = true %}
+    {% set any_on = false %}
+    {% for target in input.controlled_entities.entity_id %}
+      {% if states(target) == 'on' %}
+        {% set any_on = true %}
       {% endif %}
     {% endfor %}
-    {{ ns.found | default(false) }}
+    {{ any_on }}
   should_use_transition: >-
     {% set use_transition = true %}
-    {% set entities = expand(input.controlled_entities) %}
-    {% for entity in entities %}
-      {% if entity.domain == 'scene' %}
+    {% for target in input.controlled_entities.entity_id %}
+      {% if target.split('.')[0] == 'scene' %}
         {% set use_transition = false %}
       {% endif %}
     {% endfor %}
