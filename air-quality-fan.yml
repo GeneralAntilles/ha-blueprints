@@ -143,30 +143,34 @@ action:
               - service: switch.turn_on
                 target: !input switch_entities
     default:
-      - wait_for:
-          - condition: and
-            conditions:
-              - condition: or
-                conditions:
-                  - condition: template
-                    value_template: "{{ co2_sensor == None }}"
-                  - condition: numeric_state
-                    entity_id: !input co2_sensor
-                    below: !input co2_threshold
-              - condition: or
-                conditions:
-                  - condition: template
-                    value_template: "{{ pm25_sensor == None }}"
-                  - condition: numeric_state
-                    entity_id: !input pm25_sensor
-                    below: !input pm25_threshold
-              - condition: or
-                conditions:
-                  - condition: template
-                    value_template: "{{ tvoc_sensor == None }}"
-                  - condition: numeric_state
-                    entity_id: !input tvoc_sensor
-                    below: !input tvoc_threshold
+      - repeat:
+          while:
+            - condition: or
+              conditions:
+                - condition: and
+                  conditions:
+                    - condition: template
+                      value_template: "{{ co2_sensor != None }}"
+                    - condition: numeric_state
+                      entity_id: !input co2_sensor
+                      above: !input co2_threshold
+                - condition: and
+                  conditions:
+                    - condition: template
+                      value_template: "{{ pm25_sensor != None }}"
+                    - condition: numeric_state
+                      entity_id: !input pm25_sensor
+                      above: !input pm25_threshold
+                - condition: and
+                  conditions:
+                    - condition: template
+                      value_template: "{{ tvoc_sensor != None }}"
+                    - condition: numeric_state
+                      entity_id: !input tvoc_sensor
+                      above: !input tvoc_threshold
+          sequence:
+            - delay:
+                seconds: 10
       - delay:
           minutes: !input delay_before_off
       - if:
