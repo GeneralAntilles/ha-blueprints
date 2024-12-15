@@ -1,35 +1,50 @@
 blueprint:
   name: Air Quality-Based Fan Control
-  description: Control fans based on AirGradient sensor readings for CO2, PM2.5, and TVOC
+  description: Control fans and switches based on individual air quality sensor readings
   domain: automation
   input:
-    air_quality_sensor:
-      name: AirGradient Sensor
-      description: Select your AirGradient sensor
+    co2_sensor:
+      name: CO2 Sensor
+      description: Select your CO2 sensor (optional)
       selector:
         entity:
           domain: sensor
+      default: ~
     co2_threshold:
       name: CO2 Threshold (ppm)
-      description: CO2 level above which fans should activate
+      description: CO2 level above which devices should activate
       default: 1000
       selector:
         number:
           min: 400
           max: 5000
           unit_of_measurement: ppm
+    pm25_sensor:
+      name: PM2.5 Sensor
+      description: Select your PM2.5 sensor (optional)
+      selector:
+        entity:
+          domain: sensor
+      default: ~
     pm25_threshold:
       name: PM2.5 Threshold (μg/m³)
-      description: PM2.5 level above which fans should activate
+      description: PM2.5 level above which devices should activate
       default: 35
       selector:
         number:
           min: 0
           max: 500
           unit_of_measurement: μg/m³
+    tvoc_sensor:
+      name: TVOC Sensor
+      description: Select your TVOC sensor (optional)
+      selector:
+        entity:
+          domain: sensor
+      default: ~
     tvoc_threshold:
       name: TVOC Threshold (ppb)
-      description: TVOC level above which fans should activate
+      description: TVOC level above which devices should activate
       default: 250
       selector:
         number:
@@ -38,14 +53,15 @@ blueprint:
           unit_of_measurement: ppb
     fan_entities:
       name: Fans to Control
-      description: Select the fans to control
+      description: Select the fans to control (optional)
       selector:
         target:
           entity:
             domain: fan
+      default: {}
     switch_entities:
       name: Additional Switches
-      description: Optional switches to control (like window motors)
+      description: Optional switches to control
       selector:
         target:
           entity:
@@ -53,7 +69,7 @@ blueprint:
       default: {}
     delay_before_off:
       name: Delay Before Turning Off
-      description: Time to wait after levels drop before turning off fans (in minutes)
+      description: Time to wait after levels drop before turning off devices (in minutes)
       default: 5
       selector:
         number:
@@ -61,67 +77,109 @@ blueprint:
           max: 60
           unit_of_measurement: minutes
 
+variables:
+  co2_sensor: !input co2_sensor
+  pm25_sensor: !input pm25_sensor
+  tvoc_sensor: !input tvoc_sensor
+  has_fans: "{{ not not (expand('fan.turn_on', target=fan_entities) | map(attribute='entity_id') | list) }}"
+  has_switches: "{{ not not (expand('switch.turn_on', target=switch_entities) | map(attribute='entity_id') | list) }}"
+
 trigger:
   - platform: state
-    entity_id: !input air_quality_sensor
-  - platform: numeric_state
-    entity_id:
-      - sensor.airgradient_co2
-      - sensor.airgradient_pm25
-      - sensor.airgradient_tvoc
-    above:
-      - !input co2_threshold
-      - !input pm25_threshold
-      - !input tvoc_threshold
-  - platform: numeric_state
-    entity_id:
-      - sensor.airgradient_co2
-      - sensor.airgradient_pm25
-      - sensor.airgradient_tvoc
-    below:
-      - !input co2_threshold
-      - !input pm25_threshold
-      - !input tvoc_threshold
+    entity_id: !input co2_sensor
+    enabled: "{{ co2_sensor != None }}"
+  - platform: state
+    entity_id: !input pm25_sensor
+    enabled: "{{ pm25_sensor != None }}"
+  - platform: state
+    entity_id: !input tvoc_sensor
+    enabled: "{{ tvoc_sensor != None }}"
 
-condition: []
+condition:
+  - condition: or
+    conditions:
+      - condition: template
+        value_template: "{{ has_fans }}"
+      - condition: template
+        value_template: "{{ has_switches }}"
 
 action:
   - choose:
       - conditions:
           - condition: or
             conditions:
-              - condition: numeric_state
-                entity_id: sensor.airgradient_co2
-                above: !input co2_threshold
-              - condition: numeric_state
-                entity_id: sensor.airgradient_pm25
-                above: !input pm25_threshold
-              - condition: numeric_state
-                entity_id: sensor.airgradient_tvoc
-                above: !input tvoc_threshold
+              - condition: and
+                conditions:
+                  - condition: template
+                    value_template: "{{ co2_sensor != None }}"
+                  - condition: numeric_state
+                    entity_id: !input co2_sensor
+                    above: !input co2_threshold
+              - condition: and
+                conditions:
+                  - condition: template
+                    value_template: "{{ pm25_sensor != None }}"
+                  - condition: numeric_state
+                    entity_id: !input pm25_sensor
+                    above: !input pm25_threshold
+              - condition: and
+                conditions:
+                  - condition: template
+                    value_template: "{{ tvoc_sensor != None }}"
+                  - condition: numeric_state
+                    entity_id: !input tvoc_sensor
+                    above: !input tvoc_threshold
         sequence:
-          - service: fan.turn_on
-            target: !input fan_entities
-          - service: switch.turn_on
-            target: !input switch_entities
+          - if:
+              - condition: template
+                value_template: "{{ has_fans }}"
+            then:
+              - service: fan.turn_on
+                target: !input fan_entities
+          - if:
+              - condition: template
+                value_template: "{{ has_switches }}"
+            then:
+              - service: switch.turn_on
+                target: !input switch_entities
     default:
       - wait_for:
           - condition: and
             conditions:
-              - condition: numeric_state
-                entity_id: sensor.airgradient_co2
-                below: !input co2_threshold
-              - condition: numeric_state
-                entity_id: sensor.airgradient_pm25
-                below: !input pm25_threshold
-              - condition: numeric_state
-                entity_id: sensor.airgradient_tvoc
-                below: !input tvoc_threshold
+              - condition: or
+                conditions:
+                  - condition: template
+                    value_template: "{{ co2_sensor == None }}"
+                  - condition: numeric_state
+                    entity_id: !input co2_sensor
+                    below: !input co2_threshold
+              - condition: or
+                conditions:
+                  - condition: template
+                    value_template: "{{ pm25_sensor == None }}"
+                  - condition: numeric_state
+                    entity_id: !input pm25_sensor
+                    below: !input pm25_threshold
+              - condition: or
+                conditions:
+                  - condition: template
+                    value_template: "{{ tvoc_sensor == None }}"
+                  - condition: numeric_state
+                    entity_id: !input tvoc_sensor
+                    below: !input tvoc_threshold
       - delay:
           minutes: !input delay_before_off
-      - service: fan.turn_off
-        target: !input fan_entities
-      - service: switch.turn_off
-        target: !input switch_entities
+      - if:
+          - condition: template
+            value_template: "{{ has_fans }}"
+        then:
+          - service: fan.turn_off
+            target: !input fan_entities
+      - if:
+          - condition: template
+            value_template: "{{ has_switches }}"
+        then:
+          - service: switch.turn_off
+            target: !input switch_entities
 
 mode: single
