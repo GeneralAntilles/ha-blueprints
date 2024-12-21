@@ -43,12 +43,12 @@ trigger:
   # Trigger on humidity changes
   - platform: numeric_state
     entity_id: !input humidity_sensor
-    id: humidity_trigger
+    id: humidity_high
     above: !input humidity_high_threshold
 
   - platform: numeric_state
     entity_id: !input humidity_sensor
-    id: humidity_trigger
+    id: humidity_low
     below: !input humidity_high_threshold
 
 variables:
@@ -64,8 +64,8 @@ action:
   - choose:
       # Handle switch turned ON
       - conditions:
-          - "{{ trigger_type == 'switch_trigger' }}"
-          - "{{ is_switch_on }}"
+          - condition: template
+            value_template: "{{ trigger_type == 'switch_trigger' and is_switch_on }}"
         sequence:
           - delay:
               seconds: "{{ min_run_time_sec }}"
@@ -78,19 +78,22 @@ action:
                 target:
                   entity_id: !input fan_switch
 
-      # Handle switch turned OFF - no action needed as the switch is already off
-
-      # Handle humidity above threshold
+      # Handle humidity high
       - conditions:
-          - "{{ trigger_type == 'humidity_trigger' }}"
-          - "{{ current_humidity > humidity_threshold }}"
+          - condition: template
+            value_template: "{{ trigger_type == 'humidity_high' }}"
         sequence:
           - service: switch.turn_on
             target:
               entity_id: !input fan_switch
 
-      # Handle humidity below threshold
+      # Handle humidity low
       - conditions:
-          - "{{ trigger_type == 'humidity_trigger' }}
+          - condition: template
+            value_template: "{{ trigger_type == 'humidity_low' and states(fan_switch) == 'on' }}"
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input fan_switch
 
 mode: restart
