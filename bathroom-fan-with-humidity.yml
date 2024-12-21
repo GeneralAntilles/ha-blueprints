@@ -1,10 +1,11 @@
 blueprint:
   name: Bathroom Fan Control with Humidity Management
-  description: Controls a bathroom fan based on button input and humidity levels with minimum runtime
+  description: Controls a bathroom fan based on switch state and humidity levels with minimum runtime
   domain: automation
   input:
     fan_switch:
       name: Fan Switch
+      description: "The switch entity for the bathroom fan"
       selector:
         entity:
           domain: switch
@@ -33,48 +34,41 @@ blueprint:
           max: 60
           unit_of_measurement: "minutes"
 
-variables:
-  humidity_threshold: !input humidity_high_threshold
-  min_run_time_ms: "{{ (input.minimum_run_time | int * 60) | int }}"
-
 trigger:
-  - platform: event
-    event_type: button_pressed
-    id: "button_on"
-    event_data:
-      entity_id: !input fan_switch
-      action: "turn_on"
+  # Trigger on any state change of the fan switch
+  - platform: state
+    entity_id: !input fan_switch
+    id: switch_trigger
 
-  - platform: event
-    event_type: button_pressed
-    id: "button_off"
-    event_data:
-      entity_id: !input fan_switch
-      action: "turn_off"
-
+  # Trigger on humidity changes
   - platform: numeric_state
     entity_id: !input humidity_sensor
-    id: "humidity_high"
+    id: humidity_trigger
     above: !input humidity_high_threshold
 
   - platform: numeric_state
     entity_id: !input humidity_sensor
-    id: "humidity_normal"
+    id: humidity_trigger
     below: !input humidity_high_threshold
+
+variables:
+  humidity_threshold: !input humidity_high_threshold
+  min_run_time_sec: "{{ (input.minimum_run_time | int * 60) | int }}"
 
 action:
   - variables:
-      trigger_source: "{{ trigger.id }}"
+      trigger_type: "{{ trigger.id }}"
+      is_switch_on: "{{ trigger.to_state.state == 'on' if trigger.to_state is defined else states(fan_switch) == 'on' }}"
       current_humidity: "{{ states(humidity_sensor) | float }}"
 
   - choose:
-      # Handle button press ON
-      - conditions: "{{ trigger_source == 'button_on' }}"
+      # Handle switch turned ON
+      - conditions:
+          - "{{ trigger_type == 'switch_trigger' }}"
+          - "{{ is_switch_on }}"
         sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input fan_switch
-          - delay: "{{ min_run_time_ms }}"
+          - delay:
+              seconds: "{{ min_run_time_sec }}"
           - if:
               condition: numeric_state
               entity_id: !input humidity_sensor
@@ -84,35 +78,19 @@ action:
                 target:
                   entity_id: !input fan_switch
 
-      # Handle button press OFF
-      - conditions: "{{ trigger_source == 'button_off' }}"
-        sequence:
-          - service: switch.turn_off
-            target:
-              entity_id: !input fan_switch
+      # Handle switch turned OFF - no action needed as the switch is already off
 
-      # Handle high humidity
-      - conditions: "{{ trigger_source == 'humidity_high' }}"
+      # Handle humidity above threshold
+      - conditions:
+          - "{{ trigger_type == 'humidity_trigger' }}"
+          - "{{ current_humidity > humidity_threshold }}"
         sequence:
           - service: switch.turn_on
             target:
               entity_id: !input fan_switch
 
-      # Handle normal humidity
-      - conditions: "{{ trigger_source == 'humidity_normal' }}"
-        sequence:
-          - if:
-              condition: and
-              conditions:
-                - condition: not
-                  conditions:
-                    - condition: template
-                      value_template: "{{ is_state(fan_switch, 'on') }}"
-                - condition: template
-                  value_template: "{{ not is_state_attr(fan_switch, 'last_triggered', 'button_on') }}"
-            then:
-              - service: switch.turn_off
-                target:
-                  entity_id: !input fan_switch
+      # Handle humidity below threshold
+      - conditions:
+          - "{{ trigger_type == 'humidity_trigger' }}
 
 mode: restart
