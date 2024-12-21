@@ -1,0 +1,118 @@
+blueprint:
+  name: Bathroom Fan Control with Humidity Management
+  description: Controls a bathroom fan based on button input and humidity levels with minimum runtime
+  domain: automation
+  input:
+    fan_switch:
+      name: Fan Switch
+      selector:
+        entity:
+          domain: switch
+    humidity_sensor:
+      name: Humidity Sensor
+      selector:
+        entity:
+          domain: sensor
+          device_class: humidity
+    humidity_high_threshold:
+      name: High Humidity Threshold
+      description: "Humidity percentage that will trigger the fan (default: 50)"
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    minimum_run_time:
+      name: Minimum Run Time
+      description: "Minimum time in minutes the fan should run after manual activation (default: 15)"
+      default: 15
+      selector:
+        number:
+          min: 1
+          max: 60
+          unit_of_measurement: "minutes"
+
+variables:
+  humidity_threshold: !input humidity_high_threshold
+  min_run_time_ms: "{{ (input.minimum_run_time | int * 60) | int }}"
+
+trigger:
+  - platform: event
+    event_type: button_pressed
+    id: "button_on"
+    event_data:
+      entity_id: !input fan_switch
+      action: "turn_on"
+
+  - platform: event
+    event_type: button_pressed
+    id: "button_off"
+    event_data:
+      entity_id: !input fan_switch
+      action: "turn_off"
+
+  - platform: numeric_state
+    entity_id: !input humidity_sensor
+    id: "humidity_high"
+    above: !input humidity_high_threshold
+
+  - platform: numeric_state
+    entity_id: !input humidity_sensor
+    id: "humidity_normal"
+    below: !input humidity_high_threshold
+
+action:
+  - variables:
+      trigger_source: "{{ trigger.id }}"
+      current_humidity: "{{ states(humidity_sensor) | float }}"
+
+  - choose:
+      # Handle button press ON
+      - conditions: "{{ trigger_source == 'button_on' }}"
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input fan_switch
+          - delay: "{{ min_run_time_ms }}"
+          - if:
+              condition: numeric_state
+              entity_id: !input humidity_sensor
+              below: !input humidity_high_threshold
+            then:
+              - service: switch.turn_off
+                target:
+                  entity_id: !input fan_switch
+
+      # Handle button press OFF
+      - conditions: "{{ trigger_source == 'button_off' }}"
+        sequence:
+          - service: switch.turn_off
+            target:
+              entity_id: !input fan_switch
+
+      # Handle high humidity
+      - conditions: "{{ trigger_source == 'humidity_high' }}"
+        sequence:
+          - service: switch.turn_on
+            target:
+              entity_id: !input fan_switch
+
+      # Handle normal humidity
+      - conditions: "{{ trigger_source == 'humidity_normal' }}"
+        sequence:
+          - if:
+              condition: and
+              conditions:
+                - condition: not
+                  conditions:
+                    - condition: template
+                      value_template: "{{ is_state(fan_switch, 'on') }}"
+                - condition: template
+                  value_template: "{{ not is_state_attr(fan_switch, 'last_triggered', 'button_on') }}"
+            then:
+              - service: switch.turn_off
+                target:
+                  entity_id: !input fan_switch
+
+mode: restart
