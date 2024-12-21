@@ -1,99 +1,106 @@
 blueprint:
-  name: Bathroom Fan Control with Humidity Management
-  description: Controls a bathroom fan based on switch state and humidity levels with minimum runtime
+  name: Bathroom Fan Control
+  description: Controls bathroom fan with timer and humidity management
   domain: automation
   input:
     fan_switch:
       name: Fan Switch
-      description: "The switch entity for the bathroom fan"
       selector:
-        entity:
-          domain: switch
+        device:
+          integration: switch
+          entity: {}
     humidity_sensor:
       name: Humidity Sensor
       selector:
         entity:
           domain: sensor
           device_class: humidity
-    humidity_high_threshold:
-      name: High Humidity Threshold
-      description: "Humidity percentage that will trigger the fan (default: 50)"
-      default: 50
-      selector:
-        number:
-          min: 0
-          max: 100
-          unit_of_measurement: "%"
     minimum_run_time:
       name: Minimum Run Time
-      description: "Minimum time in minutes the fan should run after manual activation (default: 15)"
+      description: "Minimum time in minutes the fan should run"
       default: 15
       selector:
         number:
           min: 1
           max: 60
           unit_of_measurement: "minutes"
+    humidity_threshold:
+      name: Humidity Threshold
+      description: "Humidity percentage that triggers the fan"
+      default: 50
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
 
 trigger:
-  # Trigger on any state change of the fan switch
-  - platform: state
+  # Manual turn on trigger
+  - platform: device
+    type: turned_on
+    device_id: !input fan_switch
     entity_id: !input fan_switch
-    id: switch_trigger
+    domain: switch
+    id: "manual_on"
 
-  # Trigger on humidity changes
+  # High humidity trigger
   - platform: numeric_state
     entity_id: !input humidity_sensor
-    id: humidity_high
-    above: !input humidity_high_threshold
+    above: !input humidity_threshold
+    id: "humidity_high"
 
+  # Low humidity trigger
   - platform: numeric_state
     entity_id: !input humidity_sensor
-    id: humidity_low
-    below: !input humidity_high_threshold
-
-variables:
-  humidity_threshold: !input humidity_high_threshold
-  min_run_time_sec: "{{ (input.minimum_run_time | int * 60) | int }}"
+    below: !input humidity_threshold
+    id: "humidity_low"
 
 action:
   - variables:
-      trigger_type: "{{ trigger.id }}"
-      is_switch_on: "{{ trigger.to_state.state == 'on' if trigger.to_state is defined else states(fan_switch) == 'on' }}"
-      current_humidity: "{{ states(humidity_sensor) | float }}"
+      trigger_source: "{{ trigger.id }}"
 
   - choose:
-      # Handle switch turned ON
-      - conditions:
-          - condition: template
-            value_template: "{{ trigger_type == 'switch_trigger' and is_switch_on }}"
+      # Handle manual turn on
+      - conditions: "{{ trigger_source == 'manual_on' }}"
         sequence:
           - delay:
-              seconds: "{{ min_run_time_sec }}"
+              minutes: !input minimum_run_time
           - if:
-              condition: numeric_state
-              entity_id: !input humidity_sensor
-              below: !input humidity_high_threshold
+              - condition: numeric_state
+                entity_id: !input humidity_sensor
+                below: !input humidity_threshold
             then:
-              - service: switch.turn_off
-                target:
-                  entity_id: !input fan_switch
+              - device_id: !input fan_switch
+                domain: switch
+                type: turn_off
+                entity_id: !input fan_switch
 
-      # Handle humidity high
+      # Handle high humidity
       - conditions:
-          - condition: template
-            value_template: "{{ trigger_type == 'humidity_high' }}"
+          - "{{ trigger_source == 'humidity_high' }}"
+          - condition: device
+            type: is_off
+            device_id: !input fan_switch
+            entity_id: !input fan_switch
+            domain: switch
         sequence:
-          - service: switch.turn_on
-            target:
-              entity_id: !input fan_switch
+          - device_id: !input fan_switch
+            domain: switch
+            type: turn_on
+            entity_id: !input fan_switch
 
-      # Handle humidity low
+      # Handle low humidity
       - conditions:
+          - "{{ trigger_source == 'humidity_low' }}"
           - condition: template
-            value_template: "{{ trigger_type == 'humidity_low' and states(fan_switch) == 'on' }}"
+            value_template: >
+              {% set last_on = state_attr(fan_switch, 'last_changed') %}
+              {% set min_time = timedelta(minutes=minimum_run_time) %}
+              {{ (now() - last_on) > min_time }}
         sequence:
-          - service: switch.turn_off
-            target:
-              entity_id: !input fan_switch
+          - device_id: !input fan_switch
+            domain: switch
+            type: turn_off
+            entity_id: !input fan_switch
 
 mode: restart
