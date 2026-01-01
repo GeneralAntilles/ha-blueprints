@@ -1,0 +1,16 @@
+# Environment variables (contains sensitive tokens)
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
