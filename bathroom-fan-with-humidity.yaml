@@ -1,14 +1,17 @@
+---
 blueprint:
   name: Bathroom Fan Control
   description: Controls bathroom fan with timer and humidity management
   domain: automation
   input:
-    fan_switch:
-      name: Fan Switch
+    fan_entity:
+      name: Fan or Switch
+      description: Select the fan or switch to control
       selector:
-        device:
-          integration: switch
-          entity: {}
+        entity:
+          domain:
+            - fan
+            - switch
     humidity_sensor:
       name: Humidity Sensor
       selector:
@@ -36,11 +39,9 @@ blueprint:
 
 trigger:
   # Manual turn on trigger
-  - platform: device
-    type: turned_on
-    device_id: !input fan_switch
-    entity_id: !input fan_switch
-    domain: switch
+  - platform: state
+    entity_id: !input fan_entity
+    to: "on"
     id: "manual_on"
 
   # High humidity trigger
@@ -70,37 +71,29 @@ action:
                 entity_id: !input humidity_sensor
                 below: !input humidity_threshold
             then:
-              - device_id: !input fan_switch
-                domain: switch
-                type: turn_off
-                entity_id: !input fan_switch
+              - service: homeassistant.turn_off
+                target:
+                  entity_id: !input fan_entity
 
       # Handle high humidity
       - conditions:
           - "{{ trigger_source == 'humidity_high' }}"
-          - condition: device
-            type: is_off
-            device_id: !input fan_switch
-            entity_id: !input fan_switch
-            domain: switch
+          - condition: state
+            entity_id: !input fan_entity
+            state: "off"
         sequence:
-          - device_id: !input fan_switch
-            domain: switch
-            type: turn_on
-            entity_id: !input fan_switch
+          - service: homeassistant.turn_on
+            target:
+              entity_id: !input fan_entity
 
       # Handle low humidity
       - conditions:
           - "{{ trigger_source == 'humidity_low' }}"
-          - condition: template
-            value_template: >
-              {% set last_on = state_attr(fan_switch, 'last_changed') %}
-              {% set min_time = timedelta(minutes=minimum_run_time) %}
-              {{ (now() - last_on) > min_time }}
         sequence:
-          - device_id: !input fan_switch
-            domain: switch
-            type: turn_off
-            entity_id: !input fan_switch
+          - delay:
+              minutes: !input minimum_run_time
+          - service: homeassistant.turn_off
+            target:
+              entity_id: !input fan_entity
 
 mode: restart

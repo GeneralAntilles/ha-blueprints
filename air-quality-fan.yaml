@@ -1,3 +1,4 @@
+---
 blueprint:
   name: Air Quality-Based Fan Control
   description: Control fans and switches based on individual air quality sensor readings
@@ -9,7 +10,7 @@ blueprint:
       selector:
         entity:
           domain: sensor
-      default: ~
+      default: ""
     co2_threshold:
       name: CO2 Threshold (ppm)
       description: CO2 level above which devices should activate
@@ -25,7 +26,7 @@ blueprint:
       selector:
         entity:
           domain: sensor
-      default: ~
+      default: ""
     pm25_threshold:
       name: PM2.5 Threshold (μg/m³)
       description: PM2.5 level above which devices should activate
@@ -41,7 +42,7 @@ blueprint:
       selector:
         entity:
           domain: sensor
-      default: ~
+      default: ""
     tvoc_threshold:
       name: TVOC Threshold (ppb)
       description: TVOC level above which devices should activate
@@ -81,19 +82,21 @@ variables:
   co2_sensor: !input co2_sensor
   pm25_sensor: !input pm25_sensor
   tvoc_sensor: !input tvoc_sensor
-  has_fans: "{{ not not (expand('fan.turn_on', target=fan_entities) | map(attribute='entity_id') | list) }}"
-  has_switches: "{{ not not (expand('switch.turn_on', target=switch_entities) | map(attribute='entity_id') | list) }}"
+  fan_target: !input fan_entities
+  switch_target: !input switch_entities
+  has_fans: "{{ fan_target.entity_id is defined and fan_target.entity_id | length > 0 }}"
+  has_switches: "{{ switch_target.entity_id is defined and switch_target.entity_id | length > 0 }}"
 
 trigger:
   - platform: state
     entity_id: !input co2_sensor
-    enabled: "{{ co2_sensor != None }}"
+    enabled: "{{ co2_sensor != '' }}"
   - platform: state
     entity_id: !input pm25_sensor
-    enabled: "{{ pm25_sensor != None }}"
+    enabled: "{{ pm25_sensor != '' }}"
   - platform: state
     entity_id: !input tvoc_sensor
-    enabled: "{{ tvoc_sensor != None }}"
+    enabled: "{{ tvoc_sensor != '' }}"
 
 condition:
   - condition: or
@@ -111,21 +114,21 @@ action:
               - condition: and
                 conditions:
                   - condition: template
-                    value_template: "{{ co2_sensor != None }}"
+                    value_template: "{{ co2_sensor != '' }}"
                   - condition: numeric_state
                     entity_id: !input co2_sensor
                     above: !input co2_threshold
               - condition: and
                 conditions:
                   - condition: template
-                    value_template: "{{ pm25_sensor != None }}"
+                    value_template: "{{ pm25_sensor != '' }}"
                   - condition: numeric_state
                     entity_id: !input pm25_sensor
                     above: !input pm25_threshold
               - condition: and
                 conditions:
                   - condition: template
-                    value_template: "{{ tvoc_sensor != None }}"
+                    value_template: "{{ tvoc_sensor != '' }}"
                   - condition: numeric_state
                     entity_id: !input tvoc_sensor
                     above: !input tvoc_threshold
@@ -143,34 +146,29 @@ action:
               - service: switch.turn_on
                 target: !input switch_entities
     default:
-      - repeat:
-          while:
-            - condition: or
-              conditions:
-                - condition: and
-                  conditions:
-                    - condition: template
-                      value_template: "{{ co2_sensor != None }}"
-                    - condition: numeric_state
-                      entity_id: !input co2_sensor
-                      above: !input co2_threshold
-                - condition: and
-                  conditions:
-                    - condition: template
-                      value_template: "{{ pm25_sensor != None }}"
-                    - condition: numeric_state
-                      entity_id: !input pm25_sensor
-                      above: !input pm25_threshold
-                - condition: and
-                  conditions:
-                    - condition: template
-                      value_template: "{{ tvoc_sensor != None }}"
-                    - condition: numeric_state
-                      entity_id: !input tvoc_sensor
-                      above: !input tvoc_threshold
-          sequence:
-            - delay:
-                seconds: 10
+      - condition: and
+        conditions:
+          - condition: or
+            conditions:
+              - condition: template
+                value_template: "{{ co2_sensor == '' }}"
+              - condition: numeric_state
+                entity_id: !input co2_sensor
+                below: !input co2_threshold
+          - condition: or
+            conditions:
+              - condition: template
+                value_template: "{{ pm25_sensor == '' }}"
+              - condition: numeric_state
+                entity_id: !input pm25_sensor
+                below: !input pm25_threshold
+          - condition: or
+            conditions:
+              - condition: template
+                value_template: "{{ tvoc_sensor == '' }}"
+              - condition: numeric_state
+                entity_id: !input tvoc_sensor
+                below: !input tvoc_threshold
       - delay:
           minutes: !input delay_before_off
       - if:

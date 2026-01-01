@@ -1,6 +1,9 @@
+---
 blueprint:
   name: "Advanced Motion and Door Lighting Control with Late Night Mode"
-  description: "Control lights based on motion and door sensors with sun-based schedule, late night options, and override switches"
+  description: >-
+    Control lights based on motion and door sensors with sun-based schedule,
+    late night options, and override switches
   domain: automation
   input:
     motion_sensors:
@@ -127,12 +130,23 @@ trigger:
 
 variables:
   timer_name: "motion_light_timer"
+  motion_sensors: !input motion_sensors
+  door_sensors: !input door_sensors
+  late_night_start: !input late_night_start
+  late_night_end: !input late_night_end
+  late_night_wait: !input late_night_wait
+  no_motion_wait: !input no_motion_wait
+  late_night_brightness: !input late_night_brightness
+  turn_on_transition: !input turn_on_transition
+  turn_off_transition: !input turn_off_transition
+  override_input_boolean: !input override_input_boolean
+  debug_mode: !input debug_mode
   current_time: >-
     {{ now().strftime("%H:%M") }}
   is_late_night: >-
     {% set current = now().strftime("%H:%M") %}
-    {% set start = input.late_night_start %}
-    {% set end = input.late_night_end %}
+    {% set start = late_night_start %}
+    {% set end = late_night_end %}
     {% if start <= end %}
       {{ current >= start and current < end }}
     {% else %}
@@ -140,54 +154,41 @@ variables:
     {% endif %}
   current_delay: >-
     {% if is_late_night %}
-      {{ input.late_night_wait }}
+      {{ late_night_wait }}
     {% else %}
-      {{ input.no_motion_wait }}
+      {{ no_motion_wait }}
     {% endif %}
   is_motion_active: >-
-    {% set motion_active = false %}
-    {% for sensor in input.motion_sensors %}
+    {% set ns = namespace(active=false) %}
+    {% for sensor in motion_sensors %}
       {% if states(sensor) == 'on' %}
-        {% set motion_active = true %}
+        {% set ns.active = true %}
       {% endif %}
     {% endfor %}
-    {{ motion_active }}
+    {{ ns.active }}
   is_door_active: >-
-    {% set door_active = false %}
-    {% if input.door_sensors %}
-      {% for sensor in input.door_sensors %}
+    {% set ns = namespace(active=false) %}
+    {% if door_sensors %}
+      {% for sensor in door_sensors %}
         {% if states(sensor) == 'on' %}
-          {% set door_active = true %}
+          {% set ns.active = true %}
         {% endif %}
       {% endfor %}
     {% endif %}
-    {{ door_active }}
-  any_entity_on: >-
-    {% set any_on = false %}
-    {% for target in input.controlled_entities.entity_id %}
-      {% if states(target) == 'on' %}
-        {% set any_on = true %}
-      {% endif %}
-    {% endfor %}
-    {{ any_on }}
-  should_use_transition: >-
-    {% set use_transition = true %}
-    {% for target in input.controlled_entities.entity_id %}
-      {% if target.split('.')[0] == 'scene' %}
-        {% set use_transition = false %}
-      {% endif %}
-    {% endfor %}
-    {{ use_transition }}
+    {{ ns.active }}
 
 action:
   # Debug logging
   - if:
       - condition: template
-        value_template: "{{ input.debug_mode }}"
+        value_template: "{{ debug_mode }}"
     then:
       - service: system_log.write
         data:
-          message: "Motion Light Debug - Trigger: {{ trigger.id }}, Motion Active: {{ is_motion_active }}, Door Active: {{ is_door_active }}, Late Night: {{ is_late_night }}"
+          message: >-
+            Motion Light Debug - Trigger: {{ trigger.id }},
+            Motion Active: {{ is_motion_active }},
+            Door Active: {{ is_door_active }}, Late Night: {{ is_late_night }}
           level: debug
 
   # Handle HA startup
@@ -195,22 +196,18 @@ action:
       - condition: trigger
         id: "ha_start"
       - condition: template
-        value_template: >
-          {% set override_state = states(input.override_input_boolean) %}
-          {{ override_state == 'off' }}
+        value_template: "{{ states(override_input_boolean) == 'off' }}"
       - condition: template
         value_template: "{{ not is_motion_active and not is_door_active }}"
     then:
       - service: homeassistant.turn_off
         target: !input controlled_entities
         data:
-          transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
+          transition: "{{ turn_off_transition }}"
 
   # Check override state
   - condition: template
-    value_template: >
-      {% set override_state = states(input.override_input_boolean) %}
-      {{ override_state == 'off' }}
+    value_template: "{{ states(override_input_boolean) == 'off' }}"
 
   # Sun check
   - condition: or
@@ -232,21 +229,17 @@ action:
                 id: "motion_on"
               - condition: trigger
                 id: "door_on"
-          - condition: template
-            value_template: "{{ not any_entity_on }}"
         sequence:
           - service: homeassistant.turn_on
             target: !input controlled_entities
             data:
-              transition: "{{ input.turn_on_transition if should_use_transition else 0 }}"
-              brightness_pct: "{{ input.late_night_brightness if is_late_night else 100 }}"
+              transition: "{{ turn_on_transition }}"
+              brightness_pct: "{{ late_night_brightness if is_late_night else 100 }}"
 
       # Handle motion OFF trigger
       - conditions:
           - condition: trigger
             id: "motion_off"
-          - condition: template
-            value_template: "{{ any_entity_on }}"
           # Only start timer if no door is active
           - condition: template
             value_template: "{{ not is_door_active }}"
@@ -259,14 +252,12 @@ action:
           - service: homeassistant.turn_off
             target: !input controlled_entities
             data:
-              transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
+              transition: "{{ turn_off_transition }}"
 
       # Handle door OFF trigger
       - conditions:
           - condition: trigger
             id: "door_off"
-          - condition: template
-            value_template: "{{ any_entity_on }}"
           # Only start timer if no motion is active
           - condition: template
             value_template: "{{ not is_motion_active }}"
@@ -279,4 +270,4 @@ action:
           - service: homeassistant.turn_off
             target: !input controlled_entities
             data:
-              transition: "{{ input.turn_off_transition if should_use_transition else 0 }}"
+              transition: "{{ turn_off_transition }}"
