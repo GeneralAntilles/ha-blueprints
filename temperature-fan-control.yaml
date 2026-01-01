@@ -1,0 +1,243 @@
+---
+blueprint:
+  name: Temperature-Based Fan Control
+  description: >-
+    Control fans based on temperature sensors with averaging, thresholds,
+    deadzone, and delays
+  domain: automation
+  input:
+    temp_sensors:
+      name: Temperature Sensors
+      description: Select one or more temperature sensors
+      selector:
+        entity:
+          domain: sensor
+          device_class: temperature
+          multiple: true
+    sensor_mode:
+      name: Sensor Mode
+      description: How to combine multiple sensors
+      default: average
+      selector:
+        select:
+          options:
+            - label: Average
+              value: average
+            - label: Maximum
+              value: max
+            - label: Minimum
+              value: min
+    enable_fan_speed:
+      name: Enable Fan Speed Control
+      description: Use multiple speeds based on temperature (only works with fan entities)
+      default: false
+      selector:
+        boolean:
+    low_speed_threshold:
+      name: Low Speed Temperature
+      description: Temperature to activate low speed
+      default: 72
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 0.5
+          unit_of_measurement: "°F"
+    low_speed_percentage:
+      name: Low Speed Percentage
+      description: Fan speed percentage for low speed
+      default: 33
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    medium_speed_threshold:
+      name: Medium Speed Temperature
+      description: Temperature to activate medium speed
+      default: 75
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 0.5
+          unit_of_measurement: "°F"
+    medium_speed_percentage:
+      name: Medium Speed Percentage
+      description: Fan speed percentage for medium speed
+      default: 66
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    high_speed_threshold:
+      name: High Speed Temperature
+      description: Temperature to activate high speed
+      default: 78
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 0.5
+          unit_of_measurement: "°F"
+    high_speed_percentage:
+      name: High Speed Percentage
+      description: Fan speed percentage for high speed
+      default: 100
+      selector:
+        number:
+          min: 1
+          max: 100
+          unit_of_measurement: "%"
+    off_threshold:
+      name: Off Temperature (Deadzone)
+      description: >-
+        Temperature below which fans should turn off
+        (should be lower than low speed threshold for hysteresis)
+      default: 70
+      selector:
+        number:
+          min: 50
+          max: 100
+          step: 0.5
+          unit_of_measurement: "°F"
+    fan_entities:
+      name: Fans to Control
+      description: Select the fans to control
+      selector:
+        target:
+          entity:
+            domain:
+              - fan
+              - switch
+      default: {}
+    delay_before_on:
+      name: Delay Before Turning On
+      description: Wait this long after temperature exceeds threshold before turning on
+      default: 2
+      selector:
+        number:
+          min: 0
+          max: 30
+          unit_of_measurement: minutes
+    delay_before_off:
+      name: Delay Before Turning Off
+      description: Wait this long after temperature drops below threshold before turning off
+      default: 5
+      selector:
+        number:
+          min: 0
+          max: 60
+          unit_of_measurement: minutes
+
+variables:
+  temp_sensors: !input temp_sensors
+  sensor_mode: !input sensor_mode
+  enable_speed: !input enable_fan_speed
+  low_temp: !input low_speed_threshold
+  low_pct: !input low_speed_percentage
+  med_temp: !input medium_speed_threshold
+  med_pct: !input medium_speed_percentage
+  high_temp: !input high_speed_threshold
+  high_pct: !input high_speed_percentage
+  off_temp: !input off_threshold
+  delay_on: !input delay_before_on
+  delay_off: !input delay_before_off
+  # Calculate current temperature based on mode
+  current_temp: >-
+    {% set temps = temp_sensors | map('states') | map('float', 0) | list %}
+    {% if sensor_mode == 'average' %}
+      {{ (temps | sum / temps | length) | round(1) }}
+    {% elif sensor_mode == 'max' %}
+      {{ temps | max }}
+    {% else %}
+      {{ temps | min }}
+    {% endif %}
+  # Determine desired fan state and speed
+  should_be_off: >-
+    {{ current_temp | float < off_temp | float }}
+  target_speed: >-
+    {% set temp = current_temp | float %}
+    {% if temp >= high_temp | float %}
+      {{ high_pct }}
+    {% elif temp >= med_temp | float %}
+      {{ med_pct }}
+    {% elif temp >= low_temp | float %}
+      {{ low_pct }}
+    {% else %}
+      0
+    {% endif %}
+
+trigger:
+  # Trigger when any temperature sensor changes
+  - platform: state
+    entity_id: !input temp_sensors
+
+condition:
+  # Only proceed if fan entities are configured
+  - condition: template
+    value_template: "{{ not not fan_entities }}"
+
+action:
+  - choose:
+      # Speed control mode enabled
+      - conditions:
+          - condition: template
+            value_template: "{{ enable_speed }}"
+        sequence:
+          - choose:
+              # Turn off - temperature below off threshold
+              - conditions:
+                  - condition: template
+                    value_template: "{{ should_be_off }}"
+                sequence:
+                  - delay:
+                      minutes: "{{ delay_off }}"
+                  - condition: template
+                    value_template: "{{ should_be_off }}"
+                  - service: homeassistant.turn_off
+                    target: !input fan_entities
+
+              # Adjust speed based on temperature
+              - conditions:
+                  - condition: template
+                    value_template: "{{ target_speed | int > 0 }}"
+                sequence:
+                  - delay:
+                      minutes: "{{ delay_on }}"
+                  - condition: template
+                    value_template: "{{ target_speed | int > 0 }}"
+                  - service: fan.turn_on
+                    target: !input fan_entities
+                    data:
+                      percentage: "{{ target_speed | int }}"
+
+    # Simple on/off mode (no speed control)
+    default:
+      - choose:
+          # Turn on - temperature above low threshold
+          - conditions:
+              - condition: template
+                value_template: "{{ current_temp | float >= low_temp | float }}"
+            sequence:
+              - delay:
+                  minutes: "{{ delay_on }}"
+              - condition: template
+                value_template: "{{ current_temp | float >= low_temp | float }}"
+              - service: homeassistant.turn_on
+                target: !input fan_entities
+
+          # Turn off - temperature below off threshold
+          - conditions:
+              - condition: template
+                value_template: "{{ should_be_off }}"
+            sequence:
+              - delay:
+                  minutes: "{{ delay_off }}"
+              - condition: template
+                value_template: "{{ should_be_off }}"
+              - service: homeassistant.turn_off
+                target: !input fan_entities
+
+mode: restart
