@@ -1,0 +1,70 @@
+---
+blueprint:
+  name: Auto-off lights with motion and multiple overrides
+  description: Automatically turn off lights after motion/binary sensor becomes idle, with multiple override options
+  domain: automation
+  input:
+    motion_sensor:
+      name: Motion Sensor
+      selector:
+        entity:
+          domain: binary_sensor
+    light_target:
+      name: Light(s)
+      selector:
+        target:
+          entity:
+            domain: light
+    delay:
+      name: Auto-off Delay
+      description: Time to wait before turning off lights
+      default: 15
+      selector:
+        number:
+          min: 1
+          max: 120
+          unit_of_measurement: minutes
+    override_inputs:
+      name: Override Entities
+      description: If any of these boolean entities are on, auto-off won't trigger
+      default: []
+      selector:
+        entity:
+          domain: input_boolean
+          multiple: true
+
+variables:
+  override_entities: !input override_inputs
+  light_target: !input light_target
+  # Check if any override is active (returns true if any override is on)
+  any_override_active: >
+    {% if override_entities | length == 0 %}
+      false
+    {% else %}
+      {% set ns = namespace(active=false) %}
+      {% for entity in override_entities %}
+        {% if states(entity) == 'on' %}
+          {% set ns.active = true %}
+        {% endif %}
+      {% endfor %}
+      {{ ns.active }}
+    {% endif %}
+  # Only auto-off if no overrides are active
+  can_auto_off: "{{ not any_override_active }}"
+
+trigger:
+  platform: state
+  entity_id: !input motion_sensor
+  to: "off"
+  for:
+    minutes: !input delay
+
+condition:
+  - condition: template
+    value_template: "{{ can_auto_off }}"
+
+action:
+  - service: light.turn_off
+    target: !input light_target
+    metadata:
+      automation_triggered: true
