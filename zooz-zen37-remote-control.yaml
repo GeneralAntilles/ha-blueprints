@@ -1,0 +1,332 @@
+---
+blueprint:
+  name: "Zooz ZEN37 800LR Wall Remote Controller"
+  description: >-
+    Easily configure all 4 buttons on the Zooz ZEN37 800LR wall remote with support
+    for single, double, triple, quadruple, and quintuple taps, plus hold and release actions.
+  domain: automation
+  input:
+    zen37_device:
+      name: Zooz ZEN37 Remote
+      description: "Select the Zooz ZEN37 800LR remote device"
+      selector:
+        device:
+          filter:
+            - integration: zwave_js
+              manufacturer: Zooz
+              model: ZEN37 800LR
+            - integration: zwave_js
+              manufacturer: Zooz
+              model: ZEN37 LR
+
+    # Button 1 Actions
+    button_1_single:
+      name: Button 1 - Single Tap
+      description: "Action to run when button 1 is tapped once"
+      default: []
+      selector:
+        action: {}
+    button_1_double:
+      name: Button 1 - Double Tap
+      description: "Action to run when button 1 is tapped twice"
+      default: []
+      selector:
+        action: {}
+    button_1_triple:
+      name: Button 1 - Triple Tap
+      description: "Action to run when button 1 is tapped three times"
+      default: []
+      selector:
+        action: {}
+    button_1_quadruple:
+      name: Button 1 - Quadruple Tap
+      description: "Action to run when button 1 is tapped four times"
+      default: []
+      selector:
+        action: {}
+    button_1_quintuple:
+      name: Button 1 - Quintuple Tap
+      description: "Action to run when button 1 is tapped five times"
+      default: []
+      selector:
+        action: {}
+    button_1_hold:
+      name: Button 1 - Hold
+      description: "Action to run when button 1 is held down"
+      default: []
+      selector:
+        action: {}
+    button_1_release:
+      name: Button 1 - Release
+      description: "Action to run when button 1 is released"
+      default: []
+      selector:
+        action: {}
+
+    # Button 2 Actions
+    button_2_single:
+      name: Button 2 - Single Tap
+      description: "Action to run when button 2 is tapped once"
+      default: []
+      selector:
+        action: {}
+    button_2_double:
+      name: Button 2 - Double Tap
+      description: "Action to run when button 2 is tapped twice"
+      default: []
+      selector:
+        action: {}
+    button_2_triple:
+      name: Button 2 - Triple Tap
+      description: "Action to run when button 2 is tapped three times"
+      default: []
+      selector:
+        action: {}
+    button_2_quadruple:
+      name: Button 2 - Quadruple Tap
+      description: "Action to run when button 2 is tapped four times"
+      default: []
+      selector:
+        action: {}
+    button_2_quintuple:
+      name: Button 2 - Quintuple Tap
+      description: "Action to run when button 2 is tapped five times"
+      default: []
+      selector:
+        action: {}
+    button_2_hold:
+      name: Button 2 - Hold
+      description: "Action to run when button 2 is held down"
+      default: []
+      selector:
+        action: {}
+    button_2_release:
+      name: Button 2 - Release
+      description: "Action to run when button 2 is released"
+      default: []
+      selector:
+        action: {}
+
+    # Button 3 Actions
+    button_3_single:
+      name: Button 3 - Single Tap
+      description: "Action to run when button 3 is tapped once"
+      default: []
+      selector:
+        action: {}
+    button_3_double:
+      name: Button 3 - Double Tap
+      description: "Action to run when button 3 is tapped twice"
+      default: []
+      selector:
+        action: {}
+    button_3_triple:
+      name: Button 3 - Triple Tap
+      description: "Action to run when button 3 is tapped three times"
+      default: []
+      selector:
+        action: {}
+    button_3_quadruple:
+      name: Button 3 - Quadruple Tap
+      description: "Action to run when button 3 is tapped four times"
+      default: []
+      selector:
+        action: {}
+    button_3_quintuple:
+      name: Button 3 - Quintuple Tap
+      description: "Action to run when button 3 is tapped five times"
+      default: []
+      selector:
+        action: {}
+    button_3_hold:
+      name: Button 3 - Hold
+      description: "Action to run when button 3 is held down"
+      default: []
+      selector:
+        action: {}
+    button_3_release:
+      name: Button 3 - Release
+      description: "Action to run when button 3 is released"
+      default: []
+      selector:
+        action: {}
+
+    # Button 4 Actions
+    button_4_single:
+      name: Button 4 - Single Tap
+      description: "Action to run when button 4 is tapped once"
+      default: []
+      selector:
+        action: {}
+    button_4_double:
+      name: Button 4 - Double Tap
+      description: "Action to run when button 4 is tapped twice"
+      default: []
+      selector:
+        action: {}
+    button_4_triple:
+      name: Button 4 - Triple Tap
+      description: "Action to run when button 4 is tapped three times"
+      default: []
+      selector:
+        action: {}
+    button_4_quadruple:
+      name: Button 4 - Quadruple Tap
+      description: "Action to run when button 4 is tapped four times"
+      default: []
+      selector:
+        action: {}
+    button_4_quintuple:
+      name: Button 4 - Quintuple Tap
+      description: "Action to run when button 4 is tapped five times"
+      default: []
+      selector:
+        action: {}
+    button_4_hold:
+      name: Button 4 - Hold
+      description: "Action to run when button 4 is held down"
+      default: []
+      selector:
+        action: {}
+    button_4_release:
+      name: Button 4 - Release
+      description: "Action to run when button 4 is released"
+      default: []
+      selector:
+        action: {}
+
+mode: single
+max_exceeded: silent
+
+trigger:
+  - platform: event
+    event_type: zwave_js_value_notification
+    event_data:
+      command_class_name: "Central Scene"
+      device_id: !input zen37_device
+
+action:
+  - variables:
+      scene_id: "{{ trigger.event.data.property_key_name }}"
+      scene_value: "{{ trigger.event.data.value_raw }}"
+
+  - choose:
+      # Button 1 Actions (Scene 001)
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 0 }}"
+        sequence: !input button_1_single
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 3 }}"
+        sequence: !input button_1_double
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 4 }}"
+        sequence: !input button_1_triple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 5 }}"
+        sequence: !input button_1_quadruple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 6 }}"
+        sequence: !input button_1_quintuple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 1 }}"
+        sequence: !input button_1_hold
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '001' and scene_value == 2 }}"
+        sequence: !input button_1_release
+
+      # Button 2 Actions (Scene 002)
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 0 }}"
+        sequence: !input button_2_single
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 3 }}"
+        sequence: !input button_2_double
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 4 }}"
+        sequence: !input button_2_triple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 5 }}"
+        sequence: !input button_2_quadruple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 6 }}"
+        sequence: !input button_2_quintuple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 1 }}"
+        sequence: !input button_2_hold
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '002' and scene_value == 2 }}"
+        sequence: !input button_2_release
+
+      # Button 3 Actions (Scene 003)
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 0 }}"
+        sequence: !input button_3_single
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 3 }}"
+        sequence: !input button_3_double
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 4 }}"
+        sequence: !input button_3_triple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 5 }}"
+        sequence: !input button_3_quadruple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 6 }}"
+        sequence: !input button_3_quintuple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 1 }}"
+        sequence: !input button_3_hold
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '003' and scene_value == 2 }}"
+        sequence: !input button_3_release
+
+      # Button 4 Actions (Scene 004)
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 0 }}"
+        sequence: !input button_4_single
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 3 }}"
+        sequence: !input button_4_double
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 4 }}"
+        sequence: !input button_4_triple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 5 }}"
+        sequence: !input button_4_quadruple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 6 }}"
+        sequence: !input button_4_quintuple
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 1 }}"
+        sequence: !input button_4_hold
+      - conditions:
+          - condition: template
+            value_template: "{{ scene_id == '004' and scene_value == 2 }}"
+        sequence: !input button_4_release
