@@ -1,0 +1,245 @@
+---
+blueprint:
+  name: "Simple Motion-Activated Light Control"
+  description: >-
+    Control lights or scenes based on motion sensors with optional override,
+    house mode filtering, and brightness/sun conditions.
+  domain: automation
+  input:
+    motion_sensors:
+      name: Motion Sensors
+      description: "Select one or more motion sensors"
+      selector:
+        entity:
+          domain: binary_sensor
+          device_class: motion
+          multiple: true
+
+    action_on_motion:
+      name: Action When Motion Detected
+      description: "What to do when motion is detected (turn on lights, activate scene, etc.)"
+      default: []
+      selector:
+        action: {}
+
+    no_motion_wait:
+      name: Turn Off Delay
+      description: "Seconds to wait after motion clears before turning off"
+      selector:
+        number:
+          min: 0
+          max: 3600
+          unit_of_measurement: seconds
+      default: 300
+
+    turn_off_action:
+      name: Action When Motion Clears
+      description: "What to do when motion clears (turn off lights, etc.)"
+      default: []
+      selector:
+        action: {}
+
+    override_input_boolean:
+      name: Override Switch (Optional)
+      description: "Input boolean to disable motion control when turned on"
+      default: ""
+      selector:
+        entity:
+          domain: input_boolean
+
+    house_mode_entity:
+      name: House Mode (Optional)
+      description: "Input select for house mode filtering"
+      default: ""
+      selector:
+        entity:
+          domain: input_select
+
+    excluded_house_modes:
+      name: Excluded House Modes (Optional)
+      description: "Comma-separated modes to skip (e.g., party,away)"
+      default: ""
+      selector:
+        text:
+
+    sun_condition:
+      name: Sun Condition (Optional)
+      description: "Only activate when sun is below horizon"
+      default: false
+      selector:
+        boolean:
+
+    only_if_off:
+      name: Only Activate If Off
+      description: "Only trigger motion-on if target is currently off"
+      default: false
+      selector:
+        boolean:
+
+    target_entity:
+      name: Target Entity (Optional)
+      description: "Entity to check if off (for only_if_off condition)"
+      default: ""
+      selector:
+        entity:
+          domain:
+            - light
+            - switch
+            - scene
+
+    motion_tracking_boolean:
+      name: Motion Tracking Helper (Optional)
+      description: "Input boolean to track if lights were motion-activated"
+      default: ""
+      selector:
+        entity:
+          domain: input_boolean
+
+    only_clear_if_motion_activated:
+      name: Only Clear If Motion Activated
+      description: "Only turn off if motion_tracking_boolean is on"
+      default: false
+      selector:
+        boolean:
+
+    manual_control_entities:
+      name: Manual Control Entities (Optional)
+      description: "Entities that when changed will cancel motion control (e.g., light switches, button events)"
+      default: []
+      selector:
+        entity:
+          multiple: true
+
+variables:
+  override_entity: !input override_input_boolean
+  house_mode: !input house_mode_entity
+  excluded_modes: !input excluded_house_modes
+  sun_check: !input sun_condition
+  only_if_off: !input only_if_off
+  target_entity: !input target_entity
+  motion_tracking: !input motion_tracking_boolean
+  only_clear_motion: !input only_clear_if_motion_activated
+  motion_sensors: !input motion_sensors
+
+  is_motion_active: >-
+    {% set ns = namespace(active=false) %}
+    {% for sensor in motion_sensors %}
+      {% if states(sensor) == 'on' %}
+        {% set ns.active = true %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.active }}
+
+  excluded_modes_list: >-
+    {% if excluded_modes %}
+      {{ excluded_modes.split(',') | map('trim') | list }}
+    {% else %}
+      []
+    {% endif %}
+
+trigger:
+  - platform: state
+    entity_id: !input motion_sensors
+    to: "on"
+    id: "motion_on"
+  - platform: state
+    entity_id: !input motion_sensors
+    to: "off"
+    id: "motion_off"
+  - platform: state
+    entity_id: !input manual_control_entities
+    id: "manual_control"
+
+action:
+  # Check override switch
+  - condition: template
+    value_template: >-
+      {{ override_entity == '' or states(override_entity) == 'off' }}
+
+  # Check house mode exclusions
+  - condition: template
+    value_template: >-
+      {% if house_mode == '' or excluded_modes == '' %}
+        true
+      {% else %}
+        {{ states(house_mode) not in excluded_modes_list }}
+      {% endif %}
+
+  - choose:
+      # Manual control detected - cancel motion tracking
+      - conditions:
+          - condition: trigger
+            id: "manual_control"
+          - condition: template
+            value_template: "{{ motion_tracking != '' }}"
+          - condition: template
+            value_template: "{{ states(motion_tracking) == 'on' }}"
+        sequence:
+          - service: input_boolean.turn_off
+            data:
+              entity_id: "{{ motion_tracking }}"
+
+      # Motion detected
+      - conditions:
+          - condition: trigger
+            id: "motion_on"
+          # Check sun condition
+          - condition: template
+            value_template: >-
+              {% if sun_check %}
+                {{ states('sun.sun') in ['below_horizon', 'night'] }}
+              {% else %}
+                true
+              {% endif %}
+          # Check if target should be off
+          - condition: template
+            value_template: >-
+              {% if only_if_off and target_entity != '' %}
+                {{ states(target_entity) == 'off' }}
+              {% else %}
+                true
+              {% endif %}
+        sequence:
+          # Set motion tracking boolean if configured
+          - if:
+              - condition: template
+                value_template: "{{ motion_tracking != '' }}"
+            then:
+              - service: input_boolean.turn_on
+                data:
+                  entity_id: "{{ motion_tracking }}"
+          # Execute motion-on action
+          - choose: []
+            default: !input action_on_motion
+
+      # Motion cleared
+      - conditions:
+          - condition: trigger
+            id: "motion_off"
+          # Only proceed if motion tracking allows it
+          - condition: template
+            value_template: >-
+              {% if only_clear_motion and motion_tracking != '' %}
+                {{ states(motion_tracking) == 'on' }}
+              {% else %}
+                true
+              {% endif %}
+        sequence:
+          - delay:
+              seconds: !input no_motion_wait
+          # Double-check no motion is active
+          - condition: template
+            value_template: "{{ not is_motion_active }}"
+          # Clear motion tracking boolean if configured
+          - if:
+              - condition: template
+                value_template: "{{ motion_tracking != '' }}"
+            then:
+              - service: input_boolean.turn_off
+                data:
+                  entity_id: "{{ motion_tracking }}"
+          # Execute turn-off action
+          - choose: []
+            default: !input turn_off_action
+
+mode: restart
