@@ -22,14 +22,16 @@ nano .env  # Add HA path, URL, and token
 ## Blueprints
 
 ### Motion & Lighting
+- **motion-light-controller.yaml** - Motion lights v2: manual respect via tracking helper, time-of-day-sensor timeouts (day/night off-delays), optional scene turn-on, reconcile watchdog. Requires HA 2024.10+ and a per-room input_boolean
 - **motion-light-simple.yaml** - Simple motion-activated lights with scenes, overrides, and manual control cancellation
 - **motion-and-door-light-control.yaml** - Advanced motion + door sensors with late-night modes
 - **motion-auto-off-lights-with-override.yaml** - Basic motion with manual override
 
 ### Climate Control
+- **bathroom-controller.yaml** - Combined bathroom automation: humidity fan (threshold/reference/derivative modes, purge, min/max runtimes), motion lights with shower hold, optional heater with restart-surviving safety cutoff. Requires HA 2024.10+ and per-bathroom tracking helpers (see the blueprint description)
 - **temperature-fan-control.yaml** - Temperature-based fan control with multiple speed levels
 - **air-quality-fan.yaml** - Air quality fans (CO2, PM2.5, TVOC sensors)
-- **bathroom-fan-with-humidity.yaml** - Humidity-based bathroom fan with timer
+- **bathroom-fan-with-humidity.yaml** - Humidity-based bathroom fan with timer *(superseded by bathroom-controller.yaml — delete after migration soak)*
 
 ### Remotes & Controls
 - **zooz-zen37-remote-control.yaml** - Zooz ZEN37 800LR 4-button remote (all press types)
