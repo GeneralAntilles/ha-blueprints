@@ -1,0 +1,420 @@
+---
+blueprint:
+  name: Motion Light Controller (Time-of-Day Timeouts)
+  description: >-
+    Motion lighting with manual respect and time-of-day-aware timing. The
+    off-delay is chosen by a
+    time-of-day sensor you already maintain (e.g. a template sensor with
+    states like day/night/late-night), so timing policy lives in one place
+    while adaptive/Natural Light scenes handle appearance.
+
+
+    Requires HA 2024.10+ (modern trigger/action schema) and a per-room
+    tracking helper (input_boolean, created manually, NO "Initial" value so
+    state restores across restarts).
+
+
+    Manual respect: lights turned on manually are never turned off by this
+    automation; the tracking helper records automation ownership. Lights
+    turned off manually stay off until the motion sensor cycles. Ownership
+    is group-wide (one helper for all selected lights) - prefer a single
+    entity or group entity.
+
+
+    A reconciliation watchdog (HA start + every 15 minutes) heals
+    turn-off countdowns lost to automation reloads and clears stale
+    ownership flags.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    core:
+      name: Motion & Lights
+      icon: mdi:motion-sensor
+      input:
+        motion_sensors:
+          name: Motion Sensors
+          description: >-
+            Motion sensors (prefer one per room; with several, any clears
+            only after all are quiet)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+                  device_class:
+                    - motion
+                    - occupancy
+        light_entities:
+          name: Lights
+          description: >-
+            Lights and/or switches to control (prefer one entity or a
+            group)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - light
+                    - switch
+        light_auto_flag:
+          name: Light Tracking Helper
+          description: >-
+            Input boolean marking "lights are on because of this
+            automation". Required - without it the blueprint stays inert.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        no_motion_wait:
+          name: Turn Off Delay (Day)
+          description: Seconds after motion clears before lights turn off
+          default: 300
+          selector:
+            number:
+              min: 0
+              max: 3600
+              unit_of_measurement: seconds
+        scene_entity:
+          name: Turn-On Scene (Optional)
+          description: >-
+            Scene activated instead of a plain turn-on (e.g. a Natural
+            Light scene). The scene must turn on the selected Lights -
+            tracking and turn-off still target those entities. Night
+            brightness, when set, overrides the scene during night states.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: scene
+    time_of_day:
+      name: Time-of-Day Behavior (optional)
+      icon: mdi:weather-night
+      collapsed: true
+      input:
+        time_of_day_entity:
+          name: Time-of-Day Sensor
+          description: >-
+            Sensor or input_select whose state names the current time slot
+            (e.g. sensor.scene_by_time_of_day). Leave empty to always use
+            the day delay and default brightness (night inputs are
+            ignored).
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain:
+                    - sensor
+                    - input_select
+        night_states:
+          name: Night States
+          description: >-
+            Comma-separated states of the sensor that count as night
+            (e.g., night,late-night)
+          default: "night,late-night"
+          selector:
+            text:
+        no_motion_wait_night:
+          name: Turn Off Delay (Night)
+          description: Shorter off-delay used during night states
+          default: 60
+          selector:
+            number:
+              min: 0
+              max: 3600
+              unit_of_measurement: seconds
+        night_brightness_pct:
+          name: Night Brightness
+          description: >-
+            Dim light-domain entities to this during night states (0 keeps
+            default brightness - leave 0 if adaptive/Natural Light scenes
+            manage appearance)
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+    modes:
+      name: House Modes (optional)
+      icon: mdi:shield-home
+      collapsed: true
+      input:
+        house_mode_entity:
+          name: House Mode (Optional)
+          description: Input select for house mode filtering
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_select
+        excluded_house_modes:
+          name: Excluded House Modes
+          description: "Comma-separated modes to skip (e.g., party,away)"
+          default: ""
+          selector:
+            text:
+
+mode: queued
+max: 10
+max_exceeded: warning
+
+trigger_variables:
+  tv_tod_entity: !input time_of_day_entity
+  tv_night_states: !input night_states
+  tv_wait_day: !input no_motion_wait
+  tv_wait_night: !input no_motion_wait_night
+
+triggers:
+  - trigger: state
+    entity_id: !input motion_sensors
+    from: "off"
+    to: "on"
+    id: motion_on
+  # Recovery: a sensor flapping on->unavailable->on would never re-arm
+  # the from:"off" trigger above, leaving the room dark for the whole
+  # occupancy
+  - trigger: state
+    entity_id: !input motion_sensors
+    from:
+      - unavailable
+      - unknown
+    to: "on"
+    id: motion_on
+  # Single clear trigger; the off-delay is chosen by the time-of-day
+  # sensor at the moment motion clears (a day/night trigger pair has an
+  # unfixable boundary miss)
+  - trigger: state
+    entity_id: !input motion_sensors
+    from: "on"
+    to: "off"
+    for:
+      seconds: >-
+        {% set night = tv_tod_entity != ''
+           and states(tv_tod_entity) in
+               (tv_night_states.split(',') | map('trim') | list) %}
+        {{ tv_wait_night if night else tv_wait_day }}
+    id: motion_clear
+  # Flag hygiene (from: "on" so unavailable-flaps don't masquerade as
+  # manual offs)
+  - trigger: state
+    entity_id: !input light_entities
+    from: "on"
+    to: "off"
+    id: light_off
+  # Reconciliation: heals countdowns lost to automation reloads/restarts
+  # and clears stale ownership flags
+  - trigger: homeassistant
+    event: start
+    id: reconcile
+  - trigger: time_pattern
+    minutes: "/15"
+    id: reconcile
+
+variables:
+  motion_sensors: !input motion_sensors
+  light_entities: !input light_entities
+  light_auto_flag: !input light_auto_flag
+  scene_entity: !input scene_entity
+  no_motion_wait: !input no_motion_wait
+  no_motion_wait_night: !input no_motion_wait_night
+  time_of_day_entity: !input time_of_day_entity
+  night_states: !input night_states
+  night_brightness_pct: !input night_brightness_pct
+  house_mode_entity: !input house_mode_entity
+  excluded_house_modes: !input excluded_house_modes
+  night_states_list: >-
+    {{ night_states.split(',') | map('trim') | list }}
+  is_night: >-
+    {{ time_of_day_entity != ''
+       and states(time_of_day_entity) in night_states_list }}
+  applicable_wait: >-
+    {{ (no_motion_wait_night if is_night else no_motion_wait) | int }}
+  excluded_modes_list: >-
+    {% if excluded_house_modes %}
+      {{ excluded_house_modes.split(',') | map('trim') | list }}
+    {% else %} {{ [] }} {% endif %}
+  house_mode_ok: >-
+    {{ house_mode_entity == '' or excluded_house_modes == ''
+       or states(house_mode_entity) not in excluded_modes_list }}
+  lights_configured: >-
+    {{ light_entities | length > 0 and light_auto_flag != '' }}
+  is_motion_active: >-
+    {{ expand(motion_sensors) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  # No sensors (or all dropped by expand) => huge idle value: never reads
+  # as recent occupancy, always reads as timeout-elapsed
+  motion_idle_seconds: >-
+    {% set ms = expand(motion_sensors) | list %}
+    {% if ms | length == 0 %} 999999999
+    {% elif is_motion_active %} 0
+    {% else %}
+      {{ (as_timestamp(now()) - (ms | map(attribute='last_changed')
+         | map('as_timestamp') | max)) | int }}
+    {% endif %}
+  # Strict all-off (every entity exactly "off") gates turn-on so
+  # unavailable devices fail closed; any_light_on drives shutdown/hygiene
+  any_light_on: >-
+    {{ expand(light_entities) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  all_lights_off: >-
+    {{ expand(light_entities) | rejectattr('state', 'eq', 'off')
+       | list | count == 0 }}
+  light_domain_entities: >-
+    {{ light_entities | select('match', 'light\.') | list }}
+  non_light_entities: >-
+    {{ light_entities | reject('match', 'light\.') | list }}
+
+actions:
+  - choose:
+      # ==============================================================
+      # RECONCILE (ha_start + every 15 min): idempotent, off-only
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: reconcile
+        sequence:
+          # stale ownership: flag on but no light actually on
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ light_auto_flag != ''
+                     and states(light_auto_flag) == 'on'
+                     and not any_light_on }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ light_auto_flag }}"
+          # missed off (reload-lost countdown): idle past the currently
+          # applicable delay
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ lights_configured and states(light_auto_flag) == 'on'
+                     and any_light_on and not is_motion_active
+                     and motion_idle_seconds >= applicable_wait }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input light_entities
+          # configuration fault: lights selected without the tracking
+          # helper (idempotent notification)
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ light_entities | length > 0
+                     and light_auto_flag == '' }}
+            then:
+              - action: persistent_notification.create
+                data:
+                  title: Motion Light Controller configuration
+                  message: >-
+                    {{ this.attributes.friendly_name }}: lights need a
+                    Light Tracking Helper - the blueprint is inert
+                    without one.
+                  notification_id: "mlc_config_{{ this.entity_id }}"
+
+      # ==============================================================
+      # FLAG HYGIENE - the single place ownership is cleared
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: light_off
+          - condition: template
+            value_template: >-
+              {{ light_auto_flag != '' and not any_light_on }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ light_auto_flag }}"
+
+      # ==============================================================
+      # MOTION ON - partial-on means manual adjustment in progress,
+      # require ALL strictly off
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: motion_on
+          - condition: template
+            value_template: >-
+              {{ house_mode_ok and lights_configured and all_lights_off }}
+          # Manual respect: if any light changed AFTER the motion
+          # transition (a manual action racing this trigger), do not
+          # relight
+          - condition: template
+            value_template: >-
+              {% set le = expand(light_entities) | list %}
+              {{ le | length == 0
+                 or (le | map(attribute='last_changed')
+                     | map('as_timestamp') | max)
+                    <= as_timestamp(trigger.to_state.last_changed) }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ light_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ is_night and night_brightness_pct | int > 0
+                     and light_domain_entities | length > 0 }}
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ light_domain_entities }}"
+                data:
+                  brightness_pct: "{{ night_brightness_pct | int }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ non_light_entities | length > 0 }}"
+                then:
+                  - action: homeassistant.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ non_light_entities }}"
+            else:
+              - if:
+                  - condition: template
+                    value_template: "{{ scene_entity != '' }}"
+                then:
+                  - action: scene.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ scene_entity }}"
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ non_light_entities | length > 0 }}
+                    then:
+                      - action: homeassistant.turn_on
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ non_light_entities }}"
+                else:
+                  - action: homeassistant.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: !input light_entities
+
+      # ==============================================================
+      # MOTION CLEAR - delay was chosen at clear time by the trigger;
+      # the idle>=applicable re-check guards multi-sensor rooms and
+      # boundary crossings (watchdog heals the residual corner)
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: motion_clear
+          - condition: template
+            value_template: >-
+              {{ lights_configured and states(light_auto_flag) == 'on'
+                 and any_light_on and not is_motion_active
+                 and motion_idle_seconds >= applicable_wait }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input light_entities
