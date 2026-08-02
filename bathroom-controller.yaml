@@ -1,0 +1,1390 @@
+---
+blueprint:
+  name: Bathroom Controller (Fan + Lights + Heater)
+  description: >-
+    Combined bathroom automation: humidity-driven exhaust fan with post-shower
+    purge and min/max runtimes, motion lights with shower hold, and an optional
+    temperature+occupancy heater with a restart-surviving safety cutoff.
+
+
+    Requires HA 2024.10+ (modern trigger/action schema). Every device class is
+    optional — leave inputs empty to disable a subsystem. Each configured
+    subsystem needs its tracking helper (input_boolean, created manually, with
+    NO "Initial" value so state restores across restarts).
+
+
+    Manual respect: anything turned on manually is never turned off by this
+    automation (the tracking helper records automation ownership). Exceptions:
+    the heater safety deadline applies even to manual heater-on, and the
+    opt-in "Manual Fan Timeout" turns off manually started fans.
+
+
+    Multi-entity ownership is group-wide (one helper per device class): prefer
+    a single entity or a group entity per class. Demand that arises while the
+    house mode is excluded is skipped, not deferred. If all humidity sensors
+    become unavailable mid-shower, the shower hold is released by the watchdog
+    with a notification. Timeout units differ deliberately: light timeouts are
+    in seconds, fan/heater runtimes in minutes.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    occupancy_lights:
+      name: Occupancy & Lights
+      icon: mdi:lightbulb-on
+      input:
+        motion_sensors:
+          name: Motion Sensors
+          description: Motion sensors for lights and heater occupancy
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+                  device_class: motion
+        light_entities:
+          name: Lights
+          description: >-
+            Lights and/or switches to control (prefer one entity or a group)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - light
+                    - switch
+        light_auto_flag:
+          name: Light Tracking Helper
+          description: >-
+            Input boolean marking "lights are on because of this automation".
+            Required for light control to be active.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        light_timeout:
+          name: Light Timeout (Day)
+          description: Seconds after motion clears before lights turn off
+          default: 300
+          selector:
+            number:
+              min: 0
+              max: 3600
+              unit_of_measurement: seconds
+    humidity_fan:
+      name: Humidity & Fan
+      icon: mdi:fan
+      input:
+        humidity_sensors:
+          name: Bathroom Humidity Sensors
+          description: >-
+            Humidity sensors in the bathroom (highest valid reading is used).
+            Required for any humidity-based fan control.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: sensor
+                  device_class: humidity
+        humidity_on_threshold:
+          name: Humidity On Threshold
+          description: Fan turns on above this humidity
+          default: 62
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+        humidity_off_threshold:
+          name: Humidity Off Threshold
+          description: >-
+            Humidity is "settled" below this value (must be BELOW the on
+            threshold — this gap is the hysteresis)
+          default: 55
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+        fan_entities:
+          name: Exhaust Fans
+          description: >-
+            Fans and/or switches to control (prefer one entity; light domain
+            allowed for fans wired through smart dimmers)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - fan
+                    - switch
+                    - light
+        fan_auto_flag:
+          name: Fan Tracking Helper
+          description: >-
+            Input boolean marking "fan is on because of this automation".
+            Required for humidity fan control to be active.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        shower_active_flag:
+          name: Shower Tracking Helper
+          description: >-
+            Input boolean marking "shower in progress" (holds lights on
+            through steam). Required when humidity sensors are configured.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        fan_min_runtime:
+          name: Fan Minimum Runtime
+          description: Auto-started fans run at least this long
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 60
+              unit_of_measurement: minutes
+        fan_max_runtime:
+          name: Fan Maximum Runtime
+          description: >-
+            Auto-started fans are forced off after this long (should exceed
+            minimum runtime plus purge)
+          default: 120
+          selector:
+            number:
+              min: 5
+              max: 720
+              unit_of_measurement: minutes
+        fan_purge_minutes:
+          name: Post-Shower Purge Time
+          description: >-
+            Humidity must stay settled this long before the fan stops
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 60
+              unit_of_measurement: minutes
+        fan_manual_timeout:
+          name: Manual Fan Timeout
+          description: >-
+            OPT-IN exception to manual respect - turn off a manually started
+            fan after this many minutes (0 disables; replicates a classic
+            fan timer). During an active shower the fan is adopted by the
+            automation instead of being turned off.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 720
+              unit_of_measurement: minutes
+    humidity_advanced:
+      name: Advanced Humidity Modes (optional)
+      icon: mdi:water-percent-alert
+      collapsed: true
+      input:
+        reference_humidity_sensor:
+          name: Reference Humidity Sensor
+          description: >-
+            Baseline humidity sensor elsewhere in the house; triggers relative
+            to it to handle seasonal baselines
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: humidity
+        reference_on_offset:
+          name: Reference On Offset
+          description: Trigger when bathroom exceeds reference by this much
+          default: 12
+          selector:
+            number:
+              min: 1
+              max: 50
+              unit_of_measurement: "%"
+        reference_off_offset:
+          name: Reference Off Offset
+          description: >-
+            Settled requires bathroom within this much of the reference
+            (must be below the on offset)
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 50
+              unit_of_measurement: "%"
+        humidity_derivative_sensor:
+          name: Humidity Derivative Sensor
+          description: >-
+            Derivative helper over the bathroom humidity sensor (recommended
+            5-minute window, unit %/min). Catches shower spikes regardless of
+            baseline.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+        derivative_rise_rate:
+          name: Derivative Rise Rate
+          description: Trigger when humidity rises faster than this
+          default: 1.5
+          selector:
+            number:
+              min: 0.1
+              max: 10
+              step: 0.1
+              unit_of_measurement: "%/min"
+    heater:
+      name: Heater (optional)
+      icon: mdi:radiator
+      collapsed: true
+      input:
+        heater_entities:
+          name: Heater Switches
+          description: Switched heater (wall heater, heat lamp, towel warmer)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: switch
+        heater_auto_flag:
+          name: Heater Tracking Helper
+          description: >-
+            Input boolean marking "heater is on because of this automation".
+            Required for heater control.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        heater_deadline_helper:
+          name: Heater Safety Deadline Helper
+          description: >-
+            Input datetime (date AND time) storing the heater's forced-off
+            deadline. Required for heater control - this is the
+            restart-surviving safety cutoff.
+          default: "00:00:00"
+          selector:
+            entity:
+              filter:
+                - domain: input_datetime
+        heater_temp_sensors:
+          name: Bathroom Temperature Sensors
+          description: >-
+            Temperature sensors (lowest valid reading is used). Required for
+            heater control.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: sensor
+                  device_class: temperature
+        heater_on_temp:
+          name: Heater On Temperature
+          description: >-
+            Heat when below this and occupied (uses your HA temperature unit)
+          default: 64
+          selector:
+            number:
+              min: 30
+              max: 90
+              step: 0.5
+        heater_off_temp:
+          name: Heater Off Temperature
+          description: >-
+            Stop heating above this (must be above the on temperature)
+          default: 68
+          selector:
+            number:
+              min: 30
+              max: 95
+              step: 0.5
+        occupancy_grace:
+          name: Occupancy Grace Period
+          description: >-
+            Still "occupied" this long after the last motion cleared
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+        shower_counts_as_occupied:
+          name: Shower Counts As Occupied
+          description: >-
+            Treat an active shower as occupancy (steam hides you from PIRs)
+          default: true
+          selector:
+            boolean:
+        heater_max_runtime:
+          name: Heater Maximum Runtime
+          description: >-
+            SAFETY - heater is forced off after this long, even if turned on
+            manually
+          default: 45
+          selector:
+            number:
+              min: 5
+              max: 240
+              unit_of_measurement: minutes
+        heater_cooldown:
+          name: Heater Safety Cooldown
+          description: >-
+            After a safety cutoff, block automatic re-heating this long
+          default: 60
+          selector:
+            number:
+              min: 5
+              max: 480
+              unit_of_measurement: minutes
+    night_mode:
+      name: Night Mode
+      icon: mdi:weather-night
+      collapsed: true
+      input:
+        night_start:
+          name: Night Starts
+          description: >-
+            Start of the night window (equal start and end disables night
+            mode)
+          default: "22:00:00"
+          selector:
+            time:
+        night_end:
+          name: Night Ends
+          default: "06:30:00"
+          selector:
+            time:
+        light_timeout_night:
+          name: Light Timeout (Night)
+          description: Shorter motion timeout during the night window
+          default: 120
+          selector:
+            number:
+              min: 0
+              max: 3600
+              unit_of_measurement: seconds
+        night_brightness_pct:
+          name: Night Brightness
+          description: >-
+            Dim light-domain entities to this at night (0 keeps full
+            brightness)
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+        suppress_fan_at_night:
+          name: Suppress Fan At Night
+          description: >-
+            Don't START the fan during the night window (a running fan is
+            never stopped by this). Deferred demand starts the fan when night
+            ends if the shower hold is still active.
+          default: false
+          selector:
+            boolean:
+    modes_safety:
+      name: House Modes & Safety
+      icon: mdi:shield-home
+      collapsed: true
+      input:
+        house_mode_entity:
+          name: House Mode (Optional)
+          description: Input select for house mode filtering
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_select
+        excluded_house_modes:
+          name: Excluded House Modes
+          description: "Comma-separated modes to skip (e.g., party,away)"
+          default: ""
+          selector:
+            text:
+        notify_on_safety_cutoff:
+          name: Notify On Safety Cutoff
+          description: >-
+            Persistent notification when a fan/heater max-runtime cutoff or a
+            sensor fault fires
+          default: true
+          selector:
+            boolean:
+
+mode: queued
+max: 25
+max_exceeded: warning
+
+trigger_variables:
+  tv_humidity_sensors: !input humidity_sensors
+  tv_on_threshold: !input humidity_on_threshold
+  tv_reference: !input reference_humidity_sensor
+  tv_ref_on_offset: !input reference_on_offset
+  tv_ref_off_offset: !input reference_off_offset
+  tv_derivative: !input humidity_derivative_sensor
+  tv_rise_rate: !input derivative_rise_rate
+  tv_off_threshold: !input humidity_off_threshold
+  tv_temp_sensors: !input heater_temp_sensors
+  tv_heater_on_temp: !input heater_on_temp
+  tv_heater_off_temp: !input heater_off_temp
+  tv_fan_manual_timeout: !input fan_manual_timeout
+  tv_light_timeout: !input light_timeout
+  tv_light_timeout_night: !input light_timeout_night
+  tv_night_start: !input night_start
+  tv_night_end: !input night_end
+
+triggers:
+  # ------------------------------------------------------------------
+  # Occupancy / lights
+  # ------------------------------------------------------------------
+  - trigger: state
+    entity_id: !input motion_sensors
+    from: "off"
+    to: "on"
+    id: motion_on
+  # Single motion-clear trigger; the day/night timeout is chosen by template
+  # at the moment motion clears (a dual-trigger design misses at the
+  # day/night boundary; residual boundary cases heal via the watchdog).
+  - trigger: state
+    entity_id: !input motion_sensors
+    from: "on"
+    to: "off"
+    for:
+      seconds: >-
+        {% set nowt = now().strftime('%H:%M:%S') %}
+        {% if tv_night_start == tv_night_end %}
+          {{ tv_light_timeout }}
+        {% elif tv_night_start < tv_night_end %}
+          {{ tv_light_timeout_night
+             if (tv_night_start <= nowt and nowt < tv_night_end)
+             else tv_light_timeout }}
+        {% else %}
+          {{ tv_light_timeout_night
+             if (nowt >= tv_night_start or nowt < tv_night_end)
+             else tv_light_timeout }}
+        {% endif %}
+    id: motion_clear
+  - trigger: state
+    entity_id: !input motion_sensors
+    from: "on"
+    to: "off"
+    for:
+      minutes: !input occupancy_grace
+    id: occupancy_gone
+  # ------------------------------------------------------------------
+  # Humidity high (three modes, ONE shared id) - guarded template triggers
+  # so unset optional sensors leave them inert
+  # ------------------------------------------------------------------
+  - trigger: template
+    value_template: >-
+      {% if tv_humidity_sensors | length > 0 %}
+        {% set vals = tv_humidity_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {{ vals | length > 0 and (vals | max) > tv_on_threshold | float }}
+      {% else %} false {% endif %}
+    id: humidity_high
+  - trigger: template
+    value_template: >-
+      {% if tv_humidity_sensors | length > 0 and tv_reference != '' %}
+        {% set vals = tv_humidity_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {{ vals | length > 0 and is_number(states(tv_reference))
+           and (vals | max) - states(tv_reference) | float
+               > tv_ref_on_offset | float }}
+      {% else %} false {% endif %}
+    id: humidity_high
+  # Requires bathroom humidity sensors too: without them the settle trigger
+  # is inert and a derivative-set shower hold could never be released
+  - trigger: template
+    value_template: >-
+      {% if tv_humidity_sensors | length > 0 and tv_derivative != '' %}
+        {{ is_number(states(tv_derivative))
+           and states(tv_derivative) | float > tv_rise_rate | float }}
+      {% else %} false {% endif %}
+    id: humidity_high
+  # Settled = conjunction of the ENABLED humidity modes only, sustained for
+  # the purge duration
+  - trigger: template
+    value_template: >-
+      {% if tv_humidity_sensors | length > 0 %}
+        {% set vals = tv_humidity_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {% set bath = (vals | max) if vals | length > 0 else none %}
+        {% set abs_ok = bath is not none
+           and bath <= tv_off_threshold | float %}
+        {% set ref_ok = tv_reference == ''
+           or (is_number(states(tv_reference)) and bath is not none
+               and bath - states(tv_reference) | float
+                   <= tv_ref_off_offset | float) %}
+        {% set der_ok = tv_derivative == ''
+           or (is_number(states(tv_derivative))
+               and states(tv_derivative) | float < tv_rise_rate | float) %}
+        {{ abs_ok and ref_ok and der_ok }}
+      {% else %} false {% endif %}
+    for:
+      minutes: !input fan_purge_minutes
+    id: humidity_settled
+  # ------------------------------------------------------------------
+  # Fan runtime clocks
+  # ------------------------------------------------------------------
+  - trigger: state
+    entity_id: !input fan_entities
+    to: "on"
+    for:
+      minutes: !input fan_min_runtime
+    id: fan_min_elapsed
+  - trigger: state
+    entity_id: !input fan_entities
+    to: "on"
+    for:
+      minutes: !input fan_max_runtime
+    id: fan_max_elapsed
+  # for: 0 would fire immediately, so the opt-in manual timeout is gated by
+  # enabled: instead
+  - trigger: state
+    entity_id: !input fan_entities
+    to: "on"
+    for:
+      minutes: !input fan_manual_timeout
+    enabled: "{{ tv_fan_manual_timeout | float(0) > 0 }}"
+    id: fan_manual_to
+  # ------------------------------------------------------------------
+  # Flag hygiene (from: "on" so unavailable-flaps don't masquerade as
+  # manual offs)
+  # ------------------------------------------------------------------
+  - trigger: state
+    entity_id: !input fan_entities
+    from: "on"
+    to: "off"
+    id: fan_off
+  - trigger: state
+    entity_id: !input light_entities
+    from: "on"
+    to: "off"
+    id: light_off
+  - trigger: state
+    entity_id: !input heater_entities
+    from: "on"
+    to: "off"
+    id: heater_off
+  # ------------------------------------------------------------------
+  # Heater
+  # ------------------------------------------------------------------
+  # Every heater-on (manual AND auto) stamps the safety deadline
+  - trigger: state
+    entity_id: !input heater_entities
+    from: "off"
+    to: "on"
+    id: heater_on
+  - trigger: template
+    value_template: >-
+      {% if tv_temp_sensors | length > 0 %}
+        {% set vals = tv_temp_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {{ vals | length > 0 and (vals | min) < tv_heater_on_temp | float }}
+      {% else %} false {% endif %}
+    id: temp_low
+  - trigger: template
+    value_template: >-
+      {% if tv_temp_sensors | length > 0 %}
+        {% set vals = tv_temp_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {{ vals | length > 0 and (vals | min) > tv_heater_off_temp | float }}
+      {% else %} false {% endif %}
+    id: temp_high
+  # Restart-surviving safety cutoff. With no helper configured the default
+  # "00:00:00" makes this a daily no-op (guarded in the branch).
+  - trigger: time
+    at: !input heater_deadline_helper
+    id: heater_deadline_due
+  # ------------------------------------------------------------------
+  # Scheduled + reconciliation
+  # ------------------------------------------------------------------
+  - trigger: time
+    at: !input night_end
+    id: night_end_catchup
+  - trigger: homeassistant
+    event: start
+    id: reconcile
+  - trigger: time_pattern
+    minutes: "/15"
+    id: reconcile
+
+variables:
+  motion_sensors: !input motion_sensors
+  light_entities: !input light_entities
+  light_auto_flag: !input light_auto_flag
+  light_timeout: !input light_timeout
+  light_timeout_night: !input light_timeout_night
+  night_brightness_pct: !input night_brightness_pct
+  humidity_sensors: !input humidity_sensors
+  humidity_off_threshold: !input humidity_off_threshold
+  reference_humidity_sensor: !input reference_humidity_sensor
+  reference_off_offset: !input reference_off_offset
+  humidity_derivative_sensor: !input humidity_derivative_sensor
+  derivative_rise_rate: !input derivative_rise_rate
+  fan_entities: !input fan_entities
+  fan_auto_flag: !input fan_auto_flag
+  shower_active_flag: !input shower_active_flag
+  fan_min_runtime: !input fan_min_runtime
+  fan_max_runtime: !input fan_max_runtime
+  heater_entities: !input heater_entities
+  heater_auto_flag: !input heater_auto_flag
+  heater_deadline_helper: !input heater_deadline_helper
+  heater_temp_sensors: !input heater_temp_sensors
+  heater_on_temp: !input heater_on_temp
+  heater_max_runtime: !input heater_max_runtime
+  heater_cooldown: !input heater_cooldown
+  occupancy_grace: !input occupancy_grace
+  shower_counts_as_occupied: !input shower_counts_as_occupied
+  night_start: !input night_start
+  night_end: !input night_end
+  suppress_fan_at_night: !input suppress_fan_at_night
+  house_mode_entity: !input house_mode_entity
+  excluded_house_modes: !input excluded_house_modes
+  notify_on_safety_cutoff: !input notify_on_safety_cutoff
+  # ---- derived facts (per-run snapshots; recompute live via states() in
+  # any branch that mutates what it reads) ----
+  excluded_modes_list: >-
+    {% if excluded_house_modes %}
+      {{ excluded_house_modes.split(',') | map('trim') | list }}
+    {% else %} {{ [] }} {% endif %}
+  house_mode_ok: >-
+    {{ house_mode_entity == '' or excluded_house_modes == ''
+       or states(house_mode_entity) not in excluded_modes_list }}
+  is_night: >-
+    {% set nowt = now().strftime('%H:%M:%S') %}
+    {% if night_start == night_end %} false
+    {% elif night_start < night_end %}
+      {{ night_start <= nowt and nowt < night_end }}
+    {% else %}
+      {{ nowt >= night_start or nowt < night_end }}
+    {% endif %}
+  applicable_light_timeout: >-
+    {{ (light_timeout_night if is_night else light_timeout) | int }}
+  is_motion_active: >-
+    {{ expand(motion_sensors) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  # No sensors (or all dropped by expand) => a huge idle value, so
+  # "idle < grace" reads NOT occupied and "idle >= timeout" reads elapsed.
+  # An empty list must never read as recent occupancy.
+  motion_idle_seconds: >-
+    {% set ms = expand(motion_sensors) | list %}
+    {% if ms | length == 0 %} 999999999
+    {% elif is_motion_active %} 0
+    {% else %}
+      {{ (as_timestamp(now()) - (ms | map(attribute='last_changed')
+         | map('as_timestamp') | max)) | int }}
+    {% endif %}
+  lights_configured: >-
+    {{ light_entities | length > 0 and light_auto_flag != '' }}
+  fan_configured: >-
+    {{ fan_entities | length > 0 and fan_auto_flag != ''
+       and humidity_sensors | length > 0 }}
+  # The deadline input defaults to the "00:00:00" schema sentinel (the time
+  # trigger cannot load with an empty at:) - only a real entity counts as
+  # configured
+  heater_deadline_ok: >-
+    {{ heater_deadline_helper.startswith('input_datetime.') }}
+  heater_configured: >-
+    {{ heater_entities | length > 0 and heater_auto_flag != ''
+       and heater_deadline_ok
+       and heater_temp_sensors | length > 0 }}
+  light_domain_entities: >-
+    {{ light_entities | select('match', 'light\.') | list }}
+  non_light_entities: >-
+    {{ light_entities | reject('match', 'light\.') | list }}
+  # Strict all-off (every entity reports exactly "off") gates turn-ONs so
+  # unavailable/unknown devices fail closed; any_*_on drives shutdowns and
+  # flag hygiene.
+  any_light_on: >-
+    {{ expand(light_entities) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  all_lights_off: >-
+    {{ expand(light_entities) | rejectattr('state', 'eq', 'off')
+       | list | count == 0 }}
+  any_fan_on: >-
+    {{ expand(fan_entities) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  all_fans_off: >-
+    {{ expand(fan_entities) | rejectattr('state', 'eq', 'off')
+       | list | count == 0 }}
+  fan_on_seconds: >-
+    {% set on_fans = expand(fan_entities)
+       | selectattr('state', 'eq', 'on') | list %}
+    {% if on_fans | length > 0 %}
+      {{ (as_timestamp(now()) - (on_fans | map(attribute='last_changed')
+         | map('as_timestamp') | max)) | int }}
+    {% else %} 0 {% endif %}
+  any_heater_on: >-
+    {{ expand(heater_entities) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  all_heaters_off: >-
+    {{ expand(heater_entities) | rejectattr('state', 'eq', 'off')
+       | list | count == 0 }}
+  shower_hold: >-
+    {{ shower_active_flag != ''
+       and states(shower_active_flag) == 'on' }}
+  bath_humidity_valid: >-
+    {{ humidity_sensors | map('states') | select('is_number')
+       | list | length > 0 }}
+  current_temp_low: >-
+    {% set vals = heater_temp_sensors | map('states')
+       | select('is_number') | map('float') | list %}
+    {{ vals | length > 0 and (vals | min) < heater_on_temp | float }}
+  heater_deadline_ts: >-
+    {% if heater_deadline_ok
+       and states(heater_deadline_helper) not in
+           ['unknown', 'unavailable', ''] %}
+      {{ as_timestamp(states(heater_deadline_helper), none) }}
+    {% else %} {{ none }} {% endif %}
+  heater_lockout: >-
+    {{ heater_deadline_ts is not none
+       and heater_deadline_ts > as_timestamp(now()) }}
+  humidity_settled_now: >-
+    {% if humidity_sensors | length > 0 %}
+      {% set vals = humidity_sensors | map('states')
+         | select('is_number') | map('float') | list %}
+      {% set bath = (vals | max) if vals | length > 0 else none %}
+      {% set abs_ok = bath is not none
+         and bath <= humidity_off_threshold | float %}
+      {% set ref_ok = reference_humidity_sensor == ''
+         or (is_number(states(reference_humidity_sensor))
+             and bath is not none
+             and bath - states(reference_humidity_sensor) | float
+                 <= reference_off_offset | float) %}
+      {% set der_ok = humidity_derivative_sensor == ''
+         or (is_number(states(humidity_derivative_sensor))
+             and states(humidity_derivative_sensor) | float
+                 < derivative_rise_rate | float) %}
+      {{ abs_ok and ref_ok and der_ok }}
+    {% else %} false {% endif %}
+
+actions:
+  - choose:
+      # ==============================================================
+      # RECONCILE (ha_start + every 15 min): idempotent, off-only. Heals
+      # every countdown lost to automation reloads/restarts. Never turns
+      # devices on.
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: reconcile
+        sequence:
+          # (1) stale ownership flags: flag on but nothing actually on
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_auto_flag != ''
+                     and states(fan_auto_flag) == 'on' and not any_fan_on }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ light_auto_flag != ''
+                     and states(light_auto_flag) == 'on'
+                     and not any_light_on }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ light_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ heater_auto_flag != ''
+                     and states(heater_auto_flag) == 'on'
+                     and not any_heater_on }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ heater_auto_flag }}"
+          # (2) stale shower hold: humidity has settled
+          - if:
+              - condition: template
+                value_template: "{{ shower_hold and humidity_settled_now }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+          # (3) shower hold with all humidity sensors invalid: bounded
+          # release + notification
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ shower_hold and humidity_sensors | length > 0
+                     and not bath_humidity_valid }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ notify_on_safety_cutoff }}"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      title: Bathroom Controller
+                      message: >-
+                        {{ this.attributes.friendly_name }}: all humidity
+                        sensors are unavailable - shower hold released.
+                      notification_id: >-
+                        bc_sensor_fault_{{ this.entity_id }}
+          # (4) missed light-off (uses live shower state - (2) may have
+          # just cleared it)
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ lights_configured and states(light_auto_flag) == 'on'
+                     and any_light_on
+                     and not (shower_active_flag != ''
+                              and states(shower_active_flag) == 'on')
+                     and not is_motion_active
+                     and motion_idle_seconds >= applicable_light_timeout }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input light_entities
+          # (5a) missed fan-off: settled past min runtime
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_configured and states(fan_auto_flag) == 'on'
+                     and any_fan_on and humidity_settled_now
+                     and fan_on_seconds >= fan_min_runtime | int * 60 }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+          # (5b) missed fan max cutoff - mirrors the direct max branch:
+          # off, release shower hold, notify (no humidity-sensor
+          # requirement; the flag alone marks automation ownership)
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_auto_flag != ''
+                     and states(fan_auto_flag) == 'on' and any_fan_on
+                     and fan_on_seconds >= fan_max_runtime | int * 60 }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+              - if:
+                  - condition: template
+                    value_template: "{{ shower_active_flag != '' }}"
+                then:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ shower_active_flag }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ notify_on_safety_cutoff }}"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      title: Bathroom Controller
+                      message: >-
+                        {{ this.attributes.friendly_name }}: fan max
+                        runtime reached - fan forced off (watchdog).
+                      notification_id: "bc_fan_max_{{ this.entity_id }}"
+          # (6) heater deadline enforcement + self-heal
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ heater_entities | length > 0 and any_heater_on
+                     and heater_deadline_ok
+                     and heater_deadline_ts is not none
+                     and as_timestamp(now()) >= heater_deadline_ts }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input heater_entities
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: "{{ heater_deadline_helper }}"
+                data:
+                  datetime: >-
+                    {{ (now() + timedelta(minutes=heater_cooldown | int))
+                       .strftime('%Y-%m-%d %H:%M:%S') }}
+              - if:
+                  - condition: template
+                    value_template: "{{ heater_auto_flag != '' }}"
+                then:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ heater_auto_flag }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ notify_on_safety_cutoff }}"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      title: Bathroom Controller
+                      message: >-
+                        {{ this.attributes.friendly_name }}: heater max
+                        runtime reached - heater forced off (watchdog).
+                      notification_id: >-
+                        bc_heater_max_{{ this.entity_id }}
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ heater_entities | length > 0 and any_heater_on
+                     and heater_deadline_ok
+                     and heater_deadline_ts is none }}
+            then:
+              - action: input_datetime.set_datetime
+                target:
+                  entity_id: "{{ heater_deadline_helper }}"
+                data:
+                  datetime: >-
+                    {{ (now() + timedelta(minutes=heater_max_runtime | int))
+                       .strftime('%Y-%m-%d %H:%M:%S') }}
+          # (7) configuration faults (idempotent notification)
+          - variables:
+              config_faults: >-
+                {% set f = [] %}
+                {% if light_entities | length > 0
+                   and light_auto_flag == '' %}
+                  {% set f = f + ['lights need a Light Tracking Helper'] %}
+                {% endif %}
+                {% if fan_entities | length > 0
+                   and humidity_sensors | length > 0
+                   and fan_auto_flag == '' %}
+                  {% set f = f + ['fan needs a Fan Tracking Helper'] %}
+                {% endif %}
+                {% if humidity_sensors | length > 0
+                   and shower_active_flag == '' %}
+                  {% set f = f + ['humidity needs a Shower Tracking Helper']
+                  %}
+                {% endif %}
+                {% if heater_entities | length > 0
+                   and (heater_auto_flag == ''
+                        or not heater_deadline_ok
+                        or heater_temp_sensors | length == 0) %}
+                  {% set f = f + ['heater needs tracking helper, deadline
+                     helper, and temperature sensors'] %}
+                {% endif %}
+                {{ f }}
+          - if:
+              - condition: template
+                value_template: "{{ config_faults | length > 0 }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  title: Bathroom Controller configuration
+                  message: >-
+                    {{ this.attributes.friendly_name }}:
+                    {{ config_faults | join('; ') }}.
+                  notification_id: "bc_config_{{ this.entity_id }}"
+
+      # ==============================================================
+      # FLAG HYGIENE - the single place ownership flags are cleared
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: fan_off
+          - condition: template
+            value_template: "{{ fan_auto_flag != '' }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ fan_auto_flag }}"
+      - conditions:
+          - condition: trigger
+            id: light_off
+          - condition: template
+            value_template: >-
+              {{ light_auto_flag != '' and not any_light_on }}
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ light_auto_flag }}"
+      # Heater off: a NORMAL auto shutdown (flag still on when the off event
+      # arrives) resets the deadline to now, clearing the lockout. A safety
+      # cutoff clears the flag before its off event is processed (queued
+      # ordering), so was_auto is false there and the cooldown stamp
+      # survives. Manual offs keep the leftover stamp - it only delays AUTO
+      # re-heating and every off->on re-stamps it.
+      - conditions:
+          - condition: trigger
+            id: heater_off
+          - condition: template
+            value_template: "{{ heater_auto_flag != '' }}"
+        sequence:
+          - variables:
+              heater_was_auto: "{{ states(heater_auto_flag) == 'on' }}"
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ heater_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ heater_was_auto and heater_deadline_ok }}
+            then:
+              - action: input_datetime.set_datetime
+                continue_on_error: true
+                target:
+                  entity_id: "{{ heater_deadline_helper }}"
+                data:
+                  datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+      # ==============================================================
+      # HEATER SAFETY - deadline stamping and enforcement
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: heater_on
+          - condition: template
+            value_template: "{{ heater_deadline_ok }}"
+        sequence:
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: "{{ heater_deadline_helper }}"
+            data:
+              datetime: >-
+                {{ (now() + timedelta(minutes=heater_max_runtime | int))
+                   .strftime('%Y-%m-%d %H:%M:%S') }}
+      # Unconditional (manual heaters included) - the locked safety
+      # exception
+      - conditions:
+          - condition: trigger
+            id: heater_deadline_due
+          - condition: template
+            value_template: >-
+              {{ heater_deadline_ok
+                 and heater_entities | length > 0 and any_heater_on }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input heater_entities
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: "{{ heater_deadline_helper }}"
+            data:
+              datetime: >-
+                {{ (now() + timedelta(minutes=heater_cooldown | int))
+                   .strftime('%Y-%m-%d %H:%M:%S') }}
+          - if:
+              - condition: template
+                value_template: "{{ heater_auto_flag != '' }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ heater_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: "{{ notify_on_safety_cutoff }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  title: Bathroom Controller
+                  message: >-
+                    {{ this.attributes.friendly_name }}: heater max runtime
+                    reached - heater forced off. Automatic re-heating is
+                    blocked for the cooldown period.
+                  notification_id: "bc_heater_max_{{ this.entity_id }}"
+
+      # ==============================================================
+      # HUMIDITY / FAN
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: humidity_high
+          - condition: template
+            value_template: "{{ house_mode_ok }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ shower_active_flag != '' }}"
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_configured and all_fans_off
+                     and not (is_night and suppress_fan_at_night) }}
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+              - action: homeassistant.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+      # Shower over: purge complete. Whichever of settle/min-runtime
+      # finishes LAST performs the fan-off (fan_min_elapsed is the retry
+      # partner; the watchdog is the cleanup layer).
+      - conditions:
+          - condition: trigger
+            id: humidity_settled
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ shower_active_flag != '' }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_configured and states(fan_auto_flag) == 'on'
+                     and any_fan_on
+                     and fan_on_seconds >= fan_min_runtime | int * 60 }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+          # Deferred light-off: motion cleared during the shower hold
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ lights_configured and states(light_auto_flag) == 'on'
+                     and any_light_on and not is_motion_active
+                     and motion_idle_seconds >= applicable_light_timeout }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input light_entities
+          # Shower was the occupancy source - re-check heater (shower flag
+          # was just cleared, so it is excluded here)
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ heater_configured and states(heater_auto_flag) == 'on'
+                     and any_heater_on and not is_motion_active
+                     and motion_idle_seconds >= occupancy_grace | int * 60
+                  }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input heater_entities
+      - conditions:
+          - condition: trigger
+            id: fan_min_elapsed
+          - condition: template
+            value_template: >-
+              {{ fan_configured and states(fan_auto_flag) == 'on'
+                 and any_fan_on and humidity_settled_now }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input fan_entities
+      - conditions:
+          - condition: trigger
+            id: fan_max_elapsed
+          - condition: template
+            value_template: >-
+              {{ fan_auto_flag != '' and states(fan_auto_flag) == 'on'
+                 and any_fan_on }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input fan_entities
+          - if:
+              - condition: template
+                value_template: "{{ shower_active_flag != '' }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+          - if:
+              - condition: template
+                value_template: "{{ notify_on_safety_cutoff }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  title: Bathroom Controller
+                  message: >-
+                    {{ this.attributes.friendly_name }}: fan max runtime
+                    reached - fan forced off.
+                  notification_id: "bc_fan_max_{{ this.entity_id }}"
+      # Opt-in manual fan timeout (trigger is enabled only when > 0).
+      # During an active shower the fan is ADOPTED into automatic
+      # ownership instead of turned off - turning it off would leave the
+      # humidity-high template true with no new edge to re-trigger.
+      - conditions:
+          - condition: trigger
+            id: fan_manual_to
+          - condition: template
+            value_template: >-
+              {{ fan_entities | length > 0 and any_fan_on
+                 and fan_auto_flag != ''
+                 and states(fan_auto_flag) == 'off' }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ shower_hold }}"
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+            else:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+
+      # ==============================================================
+      # LIGHTS
+      # ==============================================================
+      # Partial-on means someone is adjusting manually - require ALL off
+      - conditions:
+          - condition: trigger
+            id: motion_on
+          - condition: template
+            value_template: >-
+              {{ house_mode_ok and lights_configured and all_lights_off }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ light_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ is_night and night_brightness_pct | int > 0
+                     and light_domain_entities | length > 0 }}
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ light_domain_entities }}"
+                data:
+                  brightness_pct: "{{ night_brightness_pct | int }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ non_light_entities | length > 0 }}"
+                then:
+                  - action: homeassistant.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ non_light_entities }}"
+            else:
+              - action: homeassistant.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: !input light_entities
+      # Timeout chosen at clear time by the trigger; the elapsed>=applicable
+      # re-check makes the day/night boundary safe (watchdog heals the
+      # remaining corner)
+      - conditions:
+          - condition: trigger
+            id: motion_clear
+          - condition: template
+            value_template: >-
+              {{ lights_configured and states(light_auto_flag) == 'on'
+                 and not shower_hold and not is_motion_active
+                 and motion_idle_seconds >= applicable_light_timeout }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input light_entities
+
+      # ==============================================================
+      # HEATER COMFORT (auto paths only)
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: temp_high
+          - condition: template
+            value_template: >-
+              {{ heater_configured and states(heater_auto_flag) == 'on'
+                 and any_heater_on }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input heater_entities
+      - conditions:
+          - condition: trigger
+            id: occupancy_gone
+          - condition: template
+            value_template: >-
+              {{ heater_configured and states(heater_auto_flag) == 'on'
+                 and any_heater_on
+                 and not (shower_hold and shower_counts_as_occupied)
+                 and not is_motion_active
+                 and motion_idle_seconds >= occupancy_grace | int * 60 }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input heater_entities
+
+      # ==============================================================
+      # NIGHT-END CATCH-UP - the one level-based turn-on, justified by
+      # the shower_active state evidence
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: night_end_catchup
+          - condition: template
+            value_template: >-
+              {{ suppress_fan_at_night and fan_configured and shower_hold
+                 and all_fans_off and house_mode_ok }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ fan_auto_flag }}"
+          - action: homeassistant.turn_on
+            continue_on_error: true
+            target:
+              entity_id: !input fan_entities
+
+  # ================================================================
+  # SHARED HEATER-ON step (after the choose so temp_low, motion_on and
+  # humidity_high all reach it; continue_on_error above guarantees it
+  # runs). Occupancy is recomputed live: the humidity branch may have
+  # just set shower_active in this same run.
+  # ================================================================
+  - if:
+      - condition: template
+        value_template: >-
+          {{ trigger.id | default('')
+               in ['temp_low', 'motion_on', 'humidity_high']
+             and heater_configured and all_heaters_off
+             and house_mode_ok and current_temp_low
+             and not heater_lockout
+             and (is_motion_active
+                  or motion_idle_seconds < occupancy_grace | int * 60
+                  or (shower_counts_as_occupied
+                      and (trigger.id == 'humidity_high'
+                           or (shower_active_flag != ''
+                               and states(shower_active_flag) == 'on'))))
+          }}
+    then:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: "{{ heater_auto_flag }}"
+      - action: homeassistant.turn_on
+        continue_on_error: true
+        target:
+          entity_id: !input heater_entities
