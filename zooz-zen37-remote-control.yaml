@@ -195,17 +195,20 @@ blueprint:
       selector:
         action: {}
 
-mode: single
+# Parallel so a release (or a tap on another button) is never dropped while a
+# hold action is still running
+mode: parallel
+max: 10
 max_exceeded: silent
 
-trigger:
-  - platform: event
+triggers:
+  - trigger: event
     event_type: zwave_js_value_notification
     event_data:
       command_class_name: "Central Scene"
       device_id: !input zen37_device
 
-action:
+actions:
   - variables:
       scene_id: "{{ trigger.event.data.property_key_name }}"
       scene_value: "{{ trigger.event.data.value_raw }}"
