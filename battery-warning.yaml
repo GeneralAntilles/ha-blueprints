@@ -1,0 +1,172 @@
+---
+blueprint:
+  name: Smart Battery Warning System
+  description: |
+    Intelligent battery monitoring with priority levels and smart filtering
+    to reduce spam while ensuring critical batteries are noticed.
+
+    Features:
+    - Two priority levels (Critical <10%, Warning <20%)
+    - Smart grouping and formatting
+    - Excludes charging devices
+    - Uses persistent notifications
+    - Only notifies when batteries are actually low
+  domain: automation
+  source_url: https://github.com/yourusername/ha-blueprints
+
+  input:
+    critical_threshold:
+      name: Critical Battery Level
+      description: Battery level that requires immediate attention
+      default: 10
+      selector:
+        number:
+          min: 1
+          max: 20
+          unit_of_measurement: '%'
+          step: 1
+
+    warning_threshold:
+      name: Warning Battery Level
+      description: Battery level that should be addressed soon
+      default: 20
+      selector:
+        number:
+          min: 10
+          max: 50
+          unit_of_measurement: '%'
+          step: 5
+
+    check_time:
+      name: Daily Check Time
+      description: When to run the daily battery check
+      default: '09:00:00'
+      selector:
+        time: {}
+
+    excluded_entities:
+      name: Excluded Entities
+      description: Battery sensors to exclude from monitoring
+      default:
+        entity_id: []
+      selector:
+        target:
+          entity:
+            - device_class: battery
+
+    exclude_charging:
+      name: Exclude Charging Devices
+      description: Skip devices that are currently charging
+      default: true
+      selector:
+        boolean: {}
+
+variables:
+  critical_threshold: !input critical_threshold
+  warning_threshold: !input warning_threshold
+  excluded_entities: !input excluded_entities
+  exclude_charging: !input exclude_charging
+
+  # Find all battery sensors with their states
+  all_battery_sensors: >
+    {% set ns = namespace(sensors=[]) %}
+    {% for state in states.sensor | selectattr('attributes.device_class', '==', 'battery') %}
+      {% if state.entity_id not in excluded_entities.entity_id %}
+        {% set battery_level = state.state | int(-1) %}
+        {% if battery_level >= 0 and battery_level <= 100 %}
+          {% set is_charging = state.attributes.get('is_charging', false) or
+                                states('sensor.' ~ state.object_id ~ '_charging') == 'true' %}
+          {% if not (exclude_charging and is_charging) %}
+            {% set ns.sensors = ns.sensors + [{
+              'entity_id': state.entity_id,
+              'name': state.name,
+              'level': battery_level,
+              'unit': state.attributes.unit_of_measurement | default('%')
+            }] %}
+          {% endif %}
+        {% endif %}
+      {% endif %}
+    {% endfor %}
+    {{ ns.sensors }}
+
+  # Categorize batteries by priority
+  critical_batteries: >
+    {% set batteries = all_battery_sensors | from_json %}
+    {{ batteries | selectattr('level', '<', critical_threshold) | list }}
+
+  warning_batteries: >
+    {% set batteries = all_battery_sensors | from_json %}
+    {{ batteries | selectattr('level', '>=', critical_threshold)
+                  | selectattr('level', '<', warning_threshold) | list }}
+
+  # Format battery lists for notifications
+  critical_list: >
+    {% set batteries = critical_batteries | from_json %}
+    {% if batteries | length > 0 %}
+      {% for battery in batteries | sort(attribute='level') %}
+        - {{ battery.name }}: {{ battery.level }}{{ battery.unit }}
+      {% endfor %}
+    {% else %}
+      None
+    {% endif %}
+
+  warning_list: >
+    {% set batteries = warning_batteries | from_json %}
+    {% if batteries | length > 0 %}
+      {% for battery in batteries | sort(attribute='level') %}
+        - {{ battery.name }}: {{ battery.level }}{{ battery.unit }}
+      {% endfor %}
+    {% else %}
+      None
+    {% endif %}
+
+  # Count batteries in each category
+  critical_count: >
+    {{ (critical_batteries | from_json) | length }}
+
+  warning_count: >
+    {{ (warning_batteries | from_json) | length }}
+
+trigger:
+  - platform: time
+    at: !input check_time
+
+condition:
+  # Only run if there are batteries to report
+  - condition: template
+    value_template: >
+      {{ critical_count | int > 0 or warning_count | int > 0 }}
+
+action:
+  # Send critical battery notification if any exist
+  - if:
+      - condition: template
+        value_template: "{{ critical_count | int > 0 }}"
+    then:
+      - service: notify.persistent_notification
+        data:
+          title: "🔴 Critical: {{ critical_count }} Low {{ 'Battery' if critical_count == 1 else 'Batteries' }}"
+          message: |
+            The following batteries need immediate attention:
+
+            {{ critical_list }}
+
+            {% if warning_count | int > 0 %}
+            Also {{ warning_count }} warning-level {{ 'battery' if warning_count == 1 else 'batteries' }}.
+            {% endif %}
+
+  # Send warning notification if batteries exist
+  - if:
+      - condition: template
+        value_template: "{{ warning_count | int > 0 }}"
+    then:
+      - service: notify.persistent_notification
+        data:
+          title: "🟡 Warning: {{ warning_count }} Low {{ 'Battery' if warning_count == 1 else 'Batteries' }}"
+          message: |
+            The following batteries should be replaced soon:
+
+            {{ warning_list }}
+
+mode: single
+max_exceeded: silent
