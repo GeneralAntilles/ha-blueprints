@@ -1,0 +1,670 @@
+---
+blueprint:
+  name: Wall Dimmer Natural Light Controller
+  description: >-
+    Turns an in-wall Z-Wave dimmer into a room controller. The paddle drives
+    its own load (overhead recessed cans) at a brightness chosen by time of
+    day, while the room's Hue Natural Light scene handles the smart bulbs -
+    Natural Light already adapts by time of day on its own, so only the dumb
+    load needs a brightness schedule.
+
+
+    Paddle grammar (Central Scene, physical presses only - turning the light
+    on from the app, voice or another automation is deliberately NOT a
+    trigger):
+
+
+    Up 1x - cans to the time-of-day brightness, plus the Natural Light scene.
+
+    Up 2x - Full Bright: cans and Hue lights to 100%.
+
+    Up 3x - optional custom action.
+
+    Down 1x - cans off, Hue lights off.
+
+    Down 2x - Lamps Only: cans off, Natural Light scene on.
+
+    Down 3x - optional custom action.
+
+    Hold and release are left alone so the device keeps dimming locally.
+
+
+    Requires HA 2024.10+ and a dimmer that reports Central Scene. On Zooz
+    ZEN2x/ZEN3x/ZEN7x switches "Scene Control" must be Enabled in the device
+    configuration, otherwise no multi-tap ever reaches Home Assistant.
+
+
+    A band brightness of 0 means "leave the cans dark": the paddle still
+    switches the load locally, so the automation turns it back off a moment
+    later and you see a brief flash. Prefer a low value (5) over 0 unless you
+    really want the cans off.
+
+
+    Optional single-tap prestage writes each new band level straight into
+    the switch, so the paddle turns the load on at the right brightness
+    itself instead of restoring the previous level and being corrected a
+    beat later. See the Custom Brightness Parameter input.
+
+
+    Optional zone scene sync brings these cans along when a house-wide
+    Natural Light scene is recalled by anything else, so the recessed
+    lights are not left out of a whole-house "lights on". Note this only
+    covers scenes activated THROUGH Home Assistant - a scene recalled from
+    the Hue app does not touch the cans, which is the intended behavior:
+    reaching for the Hue app means you want Hue.
+
+
+    Requires HA 2026.1+ for the scene.activated trigger used by zone sync.
+  domain: automation
+  homeassistant:
+    min_version: 2026.1.0
+  input:
+    core:
+      name: Dimmer & Lights
+      icon: mdi:light-switch
+      input:
+        dimmer_device:
+          name: Dimmer Device
+          description: >-
+            The Z-Wave dimmer whose paddle sends Central Scene events
+          selector:
+            device:
+              filter:
+                - integration: zwave_js
+        dimmer_light:
+          name: Dimmer Load
+          description: >-
+            The light entity of that same dimmer - the overhead recessed
+            cans it physically switches
+          selector:
+            entity:
+              filter:
+                - domain: light
+        hue_scene:
+          name: Natural Light Scene
+          description: >-
+            The room's Hue Natural Light scene, recalled on Up 1x and
+            Down 2x. Leave empty to control the cans only.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: scene
+        hue_lights:
+          name: Hue Lights
+          description: >-
+            The room or zone the scene belongs to (e.g. light.living_room).
+            Turned off by Down 1x and driven to 100% by Full Bright. Leave
+            empty and those gestures only touch the cans.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - light
+                    - switch
+    time_of_day:
+      name: Time-of-Day Brightness
+      icon: mdi:theme-light-dark
+      input:
+        time_of_day_entity:
+          name: Time-of-Day Sensor
+          description: >-
+            Sensor or input_select naming the current time slot (e.g.
+            sensor.scene_by_time_of_day). Pick one - the list form is only
+            so the blueprint still loads when you leave it empty, in which
+            case the default brightness below is always used.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - sensor
+                    - input_select
+        brightness_map:
+          name: Brightness by Band
+          description: >-
+            Brightness percent per state of that sensor. States not listed
+            fall back to the default below. 0 means the cans are turned back
+            off (see the flash caveat in the blueprint description).
+          default:
+            early-morning: 40
+            morning: 80
+            day: 100
+            afternoon: 100
+            evening: 70
+            night: 35
+            late-night: 5
+          selector:
+            object:
+        default_brightness_pct:
+          name: Default Brightness
+          description: >-
+            Used when no time-of-day sensor is set, or the current state is
+            not in the map above
+          default: 100
+          selector:
+            number:
+              min: 0
+              max: 100
+              unit_of_measurement: "%"
+    gestures:
+      name: Gesture Behavior
+      icon: mdi:gesture-double-tap
+      collapsed: true
+      input:
+        full_bright_pct:
+          name: Full Bright Level
+          description: Brightness the cans go to on Up 2x
+          default: 100
+          selector:
+            number:
+              min: 1
+              max: 100
+              unit_of_measurement: "%"
+        full_bright_hue:
+          name: Full Bright Includes Hue
+          description: >-
+            Also drive the Hue lights to 100% on Up 2x. Turn this off to
+            leave the smart bulbs alone and only blast the cans.
+          default: true
+          selector:
+            boolean:
+        lamps_only_scene:
+          name: Lamps Only Scene (Optional)
+          description: >-
+            Scene recalled by Down 2x instead of the Natural Light scene -
+            e.g. a dimmer evening scene. Leave empty to reuse the Natural
+            Light scene.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: scene
+        off_includes_hue:
+          name: Off Includes Hue
+          description: >-
+            Down 1x turns the Hue lights off as well as the cans. Turn this
+            off if the smart bulbs in this room are controlled elsewhere.
+          default: true
+          selector:
+            boolean:
+        up_triple_action:
+          name: Up 3x Action (Optional)
+          description: Custom action for a triple tap on the upper paddle
+          default: []
+          selector:
+            action: {}
+        down_triple_action:
+          name: Down 3x Action (Optional)
+          description: Custom action for a triple tap on the lower paddle
+          default: []
+          selector:
+            action: {}
+    modes:
+      name: House Modes (optional)
+      icon: mdi:shield-home
+      collapsed: true
+      input:
+        house_mode_entity:
+          name: House Mode (Optional)
+          description: Input select holding the house mode
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_select
+        excluded_house_modes:
+          name: Excluded House Modes
+          description: >-
+            Comma-separated modes in which scene recalls are skipped (e.g.
+            party) so the automation does not stomp on a scene you set
+            deliberately. The dimmer still controls its own load.
+          default: ""
+          selector:
+            text:
+    zone_sync:
+      name: Zone Scene Sync (optional)
+      icon: mdi:home-lightbulb
+      collapsed: true
+      input:
+        sync_scenes:
+          name: Zone Scenes
+          description: >-
+            House-wide Natural Light scenes (e.g. a Common or Home zone
+            scene) that should also bring these cans to the current
+            time-of-day brightness. The Hue bulbs are already handled by
+            whatever recalled the scene, so this only touches the load.
+
+
+            Do NOT list this room's own scene here. Down 2x turns the cans
+            off and then recalls the room scene; syncing on it would switch
+            them straight back on. The blueprint refuses to sync on its own
+            Natural Light Scene or Lamps Only Scene, but keeping them out
+            of this list is the clearer contract.
+
+
+            House-mode exclusions deliberately do NOT apply here - if
+            something recalled a zone scene, it meant it.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: scene
+    relay:
+      name: Relay / Third Button (optional)
+      icon: mdi:gesture-tap-button
+      collapsed: true
+      input:
+        relay_scene:
+          name: Relay Button Scene ID
+          description: >-
+            Central Scene number of the extra button, if the switch has one
+            (the Zooz ZEN30's relay button is 003). Leave the actions below
+            empty to ignore it.
+
+
+            If nothing is wired to that relay, set the switch's "Enable/
+            Disable Load Control for Relay" to "Local control disabled" so
+            the button stops throwing a relay at an empty circuit while
+            still reporting its taps.
+          default: "003"
+          selector:
+            select:
+              options:
+                - "001"
+                - "002"
+                - "003"
+                - "004"
+        relay_single_action:
+          name: Relay Button - Single Tap
+          default: []
+          selector:
+            action: {}
+        relay_double_action:
+          name: Relay Button - Double Tap
+          default: []
+          selector:
+            action: {}
+        relay_hold_action:
+          name: Relay Button - Hold
+          default: []
+          selector:
+            action: {}
+    prestage:
+      name: Single-Tap Prestage (optional)
+      icon: mdi:transfer-down
+      collapsed: true
+      input:
+        prestage_param:
+          name: Custom Brightness Parameter
+          description: >-
+            Z-Wave parameter holding the level the switch turns on to by
+            itself, rewritten whenever the time-of-day band changes. This
+            is what removes the flash: without it the paddle restores the
+            previous brightness locally and the automation only corrects it
+            a moment later, which at late-night means bright-then-dim.
+
+
+            Zooz ZEN77 = 18, ZEN30 = 23. The switch's "Single-Tap Upper
+            Paddle Behavior" must also be set to "Configured custom
+            brightness" or the prestaged value is ignored. 0 disables this.
+
+
+            Note the trade-off: with this on, a switch whose Home Assistant
+            is down turns on at whatever level was last prestaged rather
+            than the last level you used.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 255
+              mode: box
+    advanced:
+      name: Advanced
+      icon: mdi:tune
+      collapsed: true
+      input:
+        up_paddle_scene:
+          name: Upper Paddle Scene ID
+          description: >-
+            Central Scene number reported by the upper paddle. 001 on every
+            Zooz dimmer; the ZEN30's relay button is 003.
+          default: "001"
+          selector:
+            select:
+              options:
+                - "001"
+                - "002"
+                - "003"
+                - "004"
+        down_paddle_scene:
+          name: Lower Paddle Scene ID
+          description: Central Scene number reported by the lower paddle
+          default: "002"
+          selector:
+            select:
+              options:
+                - "001"
+                - "002"
+                - "003"
+                - "004"
+
+# Queued so a fast down-down or up-then-down never interleaves two
+# sequences against the same light. This serializes THIS instance only -
+# it does not order us against other automations or scripts touching the
+# same load, so nothing here may assume exclusive ownership
+mode: queued
+max: 5
+max_exceeded: silent
+
+triggers:
+  - trigger: event
+    event_type: zwave_js_value_notification
+    event_data:
+      command_class_name: Central Scene
+      device_id: !input dimmer_device
+    id: paddle
+  # Prestage only. An empty entity list is a trigger that never fires,
+  # which is how the time-of-day sensor stays optional
+  - trigger: state
+    entity_id: !input time_of_day_entity
+    id: band_change
+  - trigger: homeassistant
+    event: start
+    id: band_change
+  # scene.activated (HA 2026.1+) rather than a raw state trigger: Hue
+  # Natural Light is a smart_scene whose is_active/active_timeslot_id
+  # attributes churn as the day advances, and a bare state trigger would
+  # fire on that churn and relight the cans hours after they were shut off
+  - trigger: scene.activated
+    target:
+      entity_id: !input sync_scenes
+    id: scene_sync
+
+variables:
+  dimmer_light: !input dimmer_light
+  hue_scene: !input hue_scene
+  hue_lights: !input hue_lights
+  time_of_day_entity: !input time_of_day_entity
+  brightness_map: !input brightness_map
+  default_brightness_pct: !input default_brightness_pct
+  full_bright_pct: !input full_bright_pct
+  full_bright_hue: !input full_bright_hue
+  lamps_only_scene: !input lamps_only_scene
+  off_includes_hue: !input off_includes_hue
+  house_mode_entity: !input house_mode_entity
+  excluded_house_modes: !input excluded_house_modes
+  up_paddle_scene: !input up_paddle_scene
+  down_paddle_scene: !input down_paddle_scene
+  relay_scene: !input relay_scene
+  prestage_param: !input prestage_param
+
+  tod_entity: >-
+    {{ (time_of_day_entity | first) if time_of_day_entity | length > 0
+       else '' }}
+  tod_state: >-
+    {{ states(tod_entity) if tod_entity != '' else '' }}
+  # Unlisted band (or no sensor) falls back to the default; an explicit 0
+  # survives, because "0" and "not configured" mean different things here
+  band_pct: >-
+    {% set m = brightness_map if brightness_map is mapping else {} %}
+    {% set v = m.get(tod_state) %}
+    {% set p = default_brightness_pct if v is none else v %}
+    {{ [[p | int(default_brightness_pct | int), 0] | max, 100] | min }}
+  excluded_modes_list: >-
+    {% if excluded_house_modes %}
+      {{ excluded_house_modes.split(',') | map('trim') | list }}
+    {% else %} {{ [] }} {% endif %}
+  scene_ok: >-
+    {{ house_mode_entity == '' or excluded_house_modes == ''
+       or states(house_mode_entity) not in excluded_modes_list }}
+  lamps_scene: >-
+    {{ lamps_only_scene if lamps_only_scene != '' else hue_scene }}
+  # Scenes this instance recalls itself - syncing on them would fight
+  # Down 2x, which turns the cans off and then recalls the room scene
+  own_scenes: >-
+    {{ [hue_scene, lamps_only_scene, lamps_scene]
+       | reject('eq', '') | list }}
+  # Hue rooms/zones are light entities, but a lamp on a smart plug is not -
+  # only the light domain accepts a brightness
+  hue_light_domain: >-
+    {{ hue_lights | select('match', 'light\.') | list }}
+  hue_other_domain: >-
+    {{ hue_lights | reject('match', 'light\.') | list }}
+  # 0 on these switches means "previous brightness", not "off", so a band
+  # of 0 prestages the dimmest real level and the automation still kills
+  # the load afterwards
+  prestage_level: >-
+    {{ [[band_pct | int, 1] | max, 99] | min }}
+
+actions:
+  # Gate on the trigger id, NOT on `trigger.event is defined`: the
+  # homeassistant start trigger sets trigger.event to the STRING "start",
+  # which passes an is-defined test and then raises UndefinedError on
+  # .data, killing the run before the prestage branch is reached
+  - variables:
+      is_paddle: >-
+        {{ trigger is defined and (trigger.id | default('')) == 'paddle' }}
+      # Empty scene id matches no paddle branch, so every non-paddle
+      # trigger falls through to its own branch untouched
+      scene_id: >-
+        {{ trigger.event.data.property_key_name if is_paddle else '' }}
+      # value_raw is the documented field; the string form is accepted too
+      # so this survives a Z-Wave JS payload change
+      key: >-
+        {% set raw = (trigger.event.data.value_raw
+                      if is_paddle
+                         and trigger.event.data.value_raw is defined
+                      else (trigger.event.data.value if is_paddle else -1)) %}
+        {% set names = {'KeyPressed': 0, 'KeyHeldDown': 1, 'KeyReleased': 2,
+                        'KeyPressed2x': 3, 'KeyPressed3x': 4,
+                        'KeyPressed4x': 5, 'KeyPressed5x': 6} %}
+        {{ names.get(raw, raw) | int(-1) }}
+
+  - choose:
+      # ==============================================================
+      # PRESTAGE - push the new band level into the switch itself so
+      # its own single-tap already lands on the right brightness
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: band_change
+          - condition: template
+            value_template: >-
+              {{ prestage_param | int > 0
+                 and (trigger.from_state is not defined
+                      or trigger.to_state is not defined
+                      or trigger.from_state.state
+                         != trigger.to_state.state) }}
+        sequence:
+          - action: zwave_js.set_config_parameter
+            continue_on_error: true
+            target:
+              device_id: !input dimmer_device
+            data:
+              parameter: !input prestage_param
+              value: "{{ prestage_level | int }}"
+      # ==============================================================
+      # ZONE SCENE SYNC - a house-wide Natural Light scene was recalled
+      # by something else. Bring the cans along at the band level; the
+      # Hue side was already handled by whatever fired, so no scene
+      # recall here (that would also re-trigger this branch)
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: scene_sync
+          - condition: template
+            value_template: "{{ trigger.entity_id not in own_scenes }}"
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ band_pct | int > 0 }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ dimmer_light }}"
+                data:
+                  brightness_pct: "{{ band_pct | int }}"
+            else:
+              # Same zero handling as UP 1x: 0 means dark, and
+              # light.turn_on at 0% is not a reliable way to say that
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ dimmer_light }}"
+
+      # ==============================================================
+      # UP 1x - room on: cans at the band level, Natural Light scene
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == up_paddle_scene and key == 0 }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ band_pct | int > 0 }}"
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ dimmer_light }}"
+                data:
+                  brightness_pct: "{{ band_pct | int }}"
+            else:
+              # Band is 0: the paddle already switched the load on locally,
+              # so undo it and let the smart bulbs light the room
+              - action: light.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ dimmer_light }}"
+          - if:
+              - condition: template
+                value_template: "{{ scene_ok and hue_scene != '' }}"
+            then:
+              - action: scene.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ hue_scene }}"
+
+      # ==============================================================
+      # UP 2x - Full Bright (house grammar: double tap means 100%)
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == up_paddle_scene and key == 3 }}
+        sequence:
+          - action: light.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ dimmer_light }}"
+            data:
+              brightness_pct: "{{ full_bright_pct | int }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ full_bright_hue and hue_light_domain | length > 0 }}
+            then:
+              - action: light.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ hue_light_domain }}"
+                data:
+                  brightness_pct: 100
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ full_bright_hue and hue_other_domain | length > 0 }}
+            then:
+              - action: homeassistant.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ hue_other_domain }}"
+
+      # ==============================================================
+      # UP 3x - escape hatch
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == up_paddle_scene and key == 4 }}
+        sequence: !input up_triple_action
+
+      # ==============================================================
+      # DOWN 1x - room off. Driven by the paddle event rather than the
+      # load's state, so it still works when the cans are already off
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == down_paddle_scene and key == 0 }}
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ dimmer_light }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ off_includes_hue and hue_lights | length > 0 }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ hue_lights }}"
+
+      # ==============================================================
+      # DOWN 2x - Lamps Only: kill the overheads, raise Natural Light
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == down_paddle_scene and key == 3 }}
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ dimmer_light }}"
+          - if:
+              - condition: template
+                value_template: "{{ scene_ok and lamps_scene != '' }}"
+            then:
+              - action: scene.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ lamps_scene }}"
+
+      # ==============================================================
+      # DOWN 3x - escape hatch
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == down_paddle_scene and key == 4 }}
+        sequence: !input down_triple_action
+
+      # ==============================================================
+      # RELAY / THIRD BUTTON - independent of the paddle grammar, so a
+      # decoupled relay button can carry house-wide actions
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == relay_scene and key == 0 }}
+        sequence: !input relay_single_action
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == relay_scene and key == 3 }}
+        sequence: !input relay_double_action
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == relay_scene and key == 1 }}
+        sequence: !input relay_hold_action

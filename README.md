@@ -35,6 +35,7 @@ nano .env  # Add HA path, URL, and token
 
 ### Remotes & Controls
 - **zooz-zen37-remote-control.yaml** - Zooz ZEN37 800LR 4-button remote (all press types)
+- **wall-dimmer-natural-light-controller.yaml** - In-wall Z-Wave dimmer as a room controller: paddle drives its own load (recessed cans) at a time-of-day brightness while the room's Hue Natural Light scene handles the smart bulbs. Up 2x = Full Bright, Down 2x = Lamps Only. Optional single-tap prestage (writes the band level into the switch so it turns on at the right level itself), an optional relay/third-button section for switches like the ZEN30, and optional zone-scene sync so the cans join a house-wide Natural Light recall. Requires HA 2026.1+ (for the `scene.activated` trigger) and Scene Control enabled on the switch
 
 ## Development Workflow
 
