@@ -1,0 +1,58 @@
+# Fresh-air intake filter (12x12x1 MERV 12 on the 8" exterior-wall ventilator)
+# usage clock, in "equivalent days": one = a peak-summer day of blower (720
+# min) with the intake open at outdoor PM10 10 ug/m3. Each minute the blower
+# runs (either ecobee cooling/heating/fan) while input_boolean.fresh_air_intake_open
+# is on adds PM weight / 720, weight = PM10 / 10 clamped 0.5-3 (1 when the
+# AirGradient is unavailable). The AirGradient reads mostly fine particles,
+# which MERV 12 catches well, and the wall intake draws no attic dust.
+# Resets on the Log Intake Filter Change button; restores across restarts.
+- trigger:
+    - trigger: time_pattern
+      minutes: /1
+    - trigger: state
+      entity_id: input_button.fresh_air_intake_filter_changed
+      id: reset
+  sensor:
+    - unique_id: fresh_air_intake_filter_load
+      name: Fresh Air Intake Filter Load
+      icon: mdi:air-filter
+      unit_of_measurement: d
+      state_class: measurement
+      state: >-
+        {% set prev = this.state | float(0) %}
+        {% if trigger.id == 'reset' %}0
+        {% else %}
+          {% set actions = expand('climate.studio_upstairs_thermostat', 'climate.downstairs')
+               | map(attribute='attributes.hvac_action') | list %}
+          {% set blower = actions | select('in', ['cooling', 'heating', 'fan']) | list | count > 0 %}
+          {% if blower and is_state('input_boolean.fresh_air_intake_open', 'on') %}
+            {% set w = [[states('sensor.airgradient_outdoor_pm10') | float(10) / 10, 0.5] | max, 3] | min %}
+            {{ (prev + w / 720) | round(4) }}
+          {% else %}{{ prev | round(4) }}{% endif %}
+        {% endif %}
+
+# Percent of intake filter life used: whichever is further along of the load
+# vs input_number.fresh_air_intake_filter_load_target and a 365-day calendar
+# backstop (a damp wall intake can go musty before it loads up).
+- sensor:
+    - unique_id: fresh_air_intake_filter_life_used
+      name: Fresh Air Intake Filter Life Used
+      icon: mdi:air-filter
+      unit_of_measurement: '%'
+      state_class: measurement
+      state: >-
+        {% set load = states('sensor.fresh_air_intake_filter_load') | float(0) %}
+        {% set target = states('input_number.fresh_air_intake_filter_load_target') | float(180) %}
+        {% set changed = state_attr('input_datetime.fresh_air_intake_filter_changed', 'timestamp') | float(0) %}
+        {% set age = (as_timestamp(now()) - changed) / 86400 if changed > 946684800 else 0 %}
+        {{ ([load / target, age / 365] | max * 100) | round(0) }}
+      attributes:
+        age_days: >-
+          {% set changed = state_attr('input_datetime.fresh_air_intake_filter_changed', 'timestamp') | float(0) %}
+          {{ ((as_timestamp(now()) - changed) / 86400) | int if changed > 946684800 else none }}
+        limit: >-
+          {% set load = states('sensor.fresh_air_intake_filter_load') | float(0) %}
+          {% set target = states('input_number.fresh_air_intake_filter_load_target') | float(180) %}
+          {% set changed = state_attr('input_datetime.fresh_air_intake_filter_changed', 'timestamp') | float(0) %}
+          {% set age = (as_timestamp(now()) - changed) / 86400 if changed > 946684800 else 0 %}
+          {{ 'calendar' if age / 365 > load / target else 'usage' }}
