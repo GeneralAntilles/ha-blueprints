@@ -1,0 +1,191 @@
+# Kitchen air: dry-weather exhaust (2026-09-27). Reference copy of an
+# automation stored in /Volumes/config/automations.yaml (pushed via
+# /api/config/automation/config/<id>). Spike sensor: kitchen-air-templates.yaml.
+#
+# When cooking spikes living-room PM2.5 (binary_sensor.kitchen_air_spike:
+# 10+ over the 1-hour low and at least 15, for 2 min) and outdoor dew point
+# is below 60 degF, run the half bath + laundry exhaust fans until PM2.5 is
+# back near its starting level (min 10 min, max 60 min), or until outdoor
+# dew point climbs past 62.
+#
+# Why dry weather only: every CFM exhausted is replaced by outside air
+# through the 8" intake - ~5 pints/hour of water at a 73 degF outdoor dew
+# point - for maybe 15 % faster clearing (the microwave vent, Coway HEPA and
+# AC already give a ~20 min half-life; see kitchen-air-events.py).
+#
+# Ownership (restart-safe, no timestamps):
+#   - Only fans that are OFF at the start are turned on; they are listed in
+#     the run record.
+#   - Anyone turning a listed fan off during the run releases it (it's no
+#     longer ours, even if it is turned back on).
+#   - At the end a listed fan is turned off only if its controller's auto
+#     flag is explicitly off (not adopted). Fans still on after the command
+#     are retried every minute for 10 min, then given up with a notification.
+#   - The end waits while the steamer is running or the laundry room is
+#     humid (steamer-controller's 72 % on-threshold), up to 3 h, so the
+#     laundry fan isn't cut mid-steam. The half-bath controller's 15-min
+#     manual timeout will usually switch that fan off first - accepted.
+#
+# input_text.kitchen_air_exhaust_run holds the run record:
+#   active: {"s": start_ts, "b": baseline, "f": [fans we own], "x": first_stop_attempt_ts?}
+#   idle:   {"e": last_end_ts}   (a spike that began before this can't restart a run)
+#
+# Enable/disable with the automation's own switch. Disabling mid-run leaves
+# the fans on (nothing is left to stop them) - turn them off by hand.
+- id: climate_kitchen_air_dry_weather_exhaust
+  alias: 'Climate: Kitchen Air - Dry-Weather Exhaust'
+  description: >-
+    Runs the half bath + laundry exhaust fans on a cooking PM2.5 spike when
+    outdoor air is dry. Source: ha-blueprints/climate/kitchen-air-exhaust.yaml.
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.kitchen_air_spike
+      to: 'on'
+      id: check
+    - trigger: time_pattern
+      minutes: /1
+      id: check
+    - trigger: homeassistant
+      event: start
+      id: check
+    - trigger: state
+      entity_id:
+        - switch.downstairs_bathroom_fan
+        - switch.laundry_room_fan
+      from: 'on'
+      to: 'off'
+      id: fan_off
+  actions:
+    - variables:
+        fans:
+          switch.downstairs_bathroom_fan: input_boolean.downstairs_bath_fan_auto
+          switch.laundry_room_fan: input_boolean.laundry_fan_auto
+        # Read + parse in ONE template: a separate variable holding the raw
+        # JSON text would itself be auto-parsed into a dict by HA.
+        run: >-
+          {% set r = states('input_text.kitchen_air_exhaust_run') %}
+          {{ (r | from_json) if r.startswith('{') else {} }}
+        active: "{{ run.s is defined }}"
+        owned: "{{ run.f | default([]) }}"
+        now_ts: "{{ as_timestamp(now()) | int }}"
+        elapsed: "{{ now_ts - (run.s | default(now_ts) | int) }}"
+        pm: "{{ states('sensor.airgradient_living_room_pm2_5') }}"
+        base: "{{ states('sensor.living_room_pm2_5_1h_low') }}"
+        odp: "{{ states('sensor.outdoor_dewpoint') }}"
+        # Start/end decision: custom_templates/kitchen_air.jinja (source:
+        # climate/kitchen_air.jinja), shared with the Logic tab's trace.
+        # Replay-checked against the previous inline conditions
+        # (logic-view/replay-kitchen-air.py, 2000 cases, 0 diffs).
+        d: >-
+          {% from 'kitchen_air.jinja' import decide %}
+          {{ decide(run, now_ts, pm, base, odp,
+                    is_state('binary_sensor.kitchen_air_spike', 'on'),
+                    as_timestamp(states.binary_sensor.kitchen_air_spike.last_changed),
+                    is_state('input_boolean.laundry_steamer_running', 'on'),
+                    states('sensor.laundry_room_sensor_humidity')) | from_json }}
+    - choose:
+        # ---------------- someone else turned one of our fans off ---------
+        - conditions: "{{ trigger.id == 'fan_off' and active and trigger.entity_id in owned }}"
+          sequence:
+            - action: input_text.set_value
+              target:
+                entity_id: input_text.kitchen_air_exhaust_run
+              data:
+                value: >-
+                  {{ dict(run, f=owned | reject('eq', trigger.entity_id) | list) | to_json }}
+
+        # ---------------- start -------------------------------------------
+        - conditions: "{{ trigger.id == 'check' and d.start }}"
+          sequence:
+            - variables:
+                to_start: "{{ fans.keys() | select('is_state', 'off') | list }}"
+            - if: "{{ to_start | length > 0 }}"
+              then:
+                # Record first, so a restart between the two steps still
+                # ends the run cleanly.
+                - action: input_text.set_value
+                  target:
+                    entity_id: input_text.kitchen_air_exhaust_run
+                  data:
+                    value: >-
+                      {{ {'s': now_ts, 'b': base | float(0) | round(1), 'f': to_start} | to_json }}
+                - action: switch.turn_on
+                  target:
+                    entity_id: "{{ to_start }}"
+                  continue_on_error: true
+                - action: logbook.log
+                  data:
+                    name: Kitchen Air Exhaust
+                    message: >-
+                      started {{ to_start | join(', ') }} - PM2.5 {{ pm }} (1h low {{ base }}),
+                      outdoor dew point {{ odp }}°F
+                    entity_id: automation.climate_kitchen_air_dry_weather_exhaust
+
+        # ---------------- end (and stop retries) --------------------------
+        - conditions: "{{ trigger.id == 'check' and d.end }}"
+          sequence:
+            # Adopted by its controller (flag on) or already off: not ours
+            # to stop. Flag unknown/unavailable: hold and retry.
+            - variables:
+                to_stop: "{{ owned | select('is_state', 'on') | list }}"
+            - variables:
+                stoppable: >-
+                  {% set ns = namespace(l=[]) %}
+                  {% for f in to_stop if f in fans and is_state(fans[f], 'off') %}
+                    {% set ns.l = ns.l + [f] %}
+                  {% endfor %}
+                  {{ ns.l }}
+            - if: "{{ stoppable | length > 0 }}"
+              then:
+                - action: switch.turn_off
+                  target:
+                    entity_id: "{{ stoppable }}"
+                  continue_on_error: true
+                - delay:
+                    seconds: 10
+            - variables:
+                remaining: >-
+                  {% set ns = namespace(l=[]) %}
+                  {% for f in owned if f in fans and is_state(f, 'on')
+                       and not is_state(fans[f], 'on') %}
+                    {% set ns.l = ns.l + [f] %}
+                  {% endfor %}
+                  {{ ns.l }}
+                first_try: "{{ run.x | default(now_ts) | int }}"
+            - choose:
+                - conditions: "{{ remaining | length == 0 }}"
+                  sequence:
+                    - action: input_text.set_value
+                      target:
+                        entity_id: input_text.kitchen_air_exhaust_run
+                      data:
+                        value: "{{ {'e': now_ts} | to_json }}"
+                    - action: logbook.log
+                      data:
+                        name: Kitchen Air Exhaust
+                        message: >-
+                          ended after {{ (elapsed / 60) | int }} min - PM2.5 {{ pm }},
+                          outdoor dew point {{ odp }}°F; turned off {{ stoppable | join(', ') or 'nothing' }}
+                        entity_id: automation.climate_kitchen_air_dry_weather_exhaust
+                - conditions: "{{ now_ts - first_try > 600 }}"
+                  sequence:
+                    - action: input_text.set_value
+                      target:
+                        entity_id: input_text.kitchen_air_exhaust_run
+                      data:
+                        value: "{{ {'e': now_ts} | to_json }}"
+                    - action: persistent_notification.create
+                      data:
+                        notification_id: kitchen_air_exhaust_stuck
+                        title: Kitchen air exhaust couldn't stop a fan
+                        message: >-
+                          Still on after 10 min of retries: {{ remaining | join(', ') }}.
+                          Turn it off by hand if it isn't needed.
+              default:
+                - action: input_text.set_value
+                  target:
+                    entity_id: input_text.kitchen_air_exhaust_run
+                  data:
+                    value: "{{ dict(run, f=remaining, x=first_try) | to_json }}"

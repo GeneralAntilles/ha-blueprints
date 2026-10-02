@@ -1,0 +1,36 @@
+# Kitchen air (2026-09-27). Reference copy of the block appended to
+# /Volumes/config/templates.yaml between the "kitchen air" markers.
+# Used by kitchen-air-exhaust.yaml.
+
+# A cooking spike: living-room PM2.5 at least 10 over its 1-hour low and at
+# least 15, held for 2 min. A template entity (rather than a template
+# trigger) so the automation's minute check can also see a spike that was
+# already in progress across a reload, restart or re-enable.
+- binary_sensor:
+    - unique_id: kitchen_air_spike
+      name: Kitchen Air Spike
+      icon: mdi:stove
+      state: >-
+        {% set pm = states('sensor.airgradient_living_room_pm2_5') %}
+        {% set base = states('sensor.living_room_pm2_5_1h_low') %}
+        {{ is_number(pm) and is_number(base)
+           and pm | float >= base | float + 10 and pm | float >= 15 }}
+      availability: >-
+        {{ is_number(states('sensor.airgradient_living_room_pm2_5'))
+           and is_number(states('sensor.living_room_pm2_5_1h_low')) }}
+      delay_on:
+        minutes: 2
+
+# The exhaust's start/end ladder for the Logic tab (logic-view/logic-trace-card.js).
+# Same macro as the automation's conditions. Recorder-excluded by sensor.*_trace.
+- sensor:
+    - unique_id: kitchen_air_exhaust_trace
+      name: Kitchen Air Exhaust Trace
+      icon: mdi:head-cog-outline
+      state: >-
+        {% from 'kitchen_air.jinja' import live %}
+        {{ (live() | from_json).mode }}
+      attributes:
+        trace: >-
+          {% from 'kitchen_air.jinja' import live %}
+          {{ live() | from_json }}

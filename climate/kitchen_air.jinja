@@ -1,0 +1,110 @@
+{#- Kitchen air dry-weather exhaust decision (2026-09-30). Deployed to
+    /config/custom_templates/kitchen_air.jinja; used by the
+    climate_kitchen_air_dry_weather_exhaust automation (its start/end
+    conditions) and sensor.kitchen_air_exhaust_trace (the Logic tab), so the
+    view can never disagree with the automation. Ownership, stop retries and
+    the run record stay in the automation.
+
+    decide() is pure (inputs passed in) so logic-view/replay-kitchen-air.py
+    can check it against the previous inline conditions. It returns JSON:
+      active, start, end, spike_new, laundry_busy, elapsed (s)
+      state/mode/decided/gates  the ladder the Logic tab draws: while idle the
+        START checks (all must pass), while running the KEEP-RUNNING checks
+        (the first to fail ends the run, unless the laundry hold applies). -#}
+
+{%- macro r(x) -%}{{ x | round(0) | int }}{%- endmacro -%}
+
+{%- macro decide(run, now_ts, pm, base, odp, spike_on, spike_changed_ts, steamer_on, laundry_rh) -%}
+  {%- set active = run.s is defined -%}
+  {%- set owned = run.f | default([]) -%}
+  {%- set elapsed = now_ts - (run.s | default(now_ts) | int) -%}
+  {%- set newer = spike_changed_ts > (run.e | default(0) | float) -%}
+  {%- set spike_new = spike_on and newer -%}
+  {%- set laundry_busy = 'switch.laundry_room_fan' in owned
+       and (steamer_on or laundry_rh | float(0) >= 72) -%}
+  {%- set dry_ok = odp is is_number and odp | float < 60 -%}
+  {%- set start = not active and spike_new and dry_ok -%}
+  {%- set clear_to = run.b | default(0) | float + 3 -%}
+  {%- set cleared = elapsed >= 600 and pm is is_number and pm | float <= clear_to -%}
+  {%- set humid_end = not odp is is_number or odp | float >= 62 -%}
+  {%- set would_end = run.x is defined or owned | length == 0 or elapsed >= 3600 or humid_end or cleared -%}
+  {%- set end = active and not (laundry_busy and elapsed < 10800) and would_end -%}
+  {%- set pmv = pm | float if pm is is_number else none -%}
+  {%- set basev = base | float if base is is_number else none -%}
+  {%- set odpv = odp | float if odp is is_number else none -%}
+  {%- if not active -%}
+    {%- set gates = [
+      {'k': 'spike', 'q': 'Cooking spike', 'short': 'No cooking spike', 'unit': 'µg/m³ rise',
+       'v': (pmv - basev) | round(1) if pmv is number and basev is number else none, 't': 10, 't_alt': 10,
+       'cmp': '<', 'lo': 0, 'hi': 40, 'fail': not spike_on, 'reason': 'No cooking spike',
+       'note': 'PM2.5 must also be ≥ 15, held 2 min'},
+      {'k': 'new', 'q': 'New since the last run', 'short': 'Spike already handled', 'unit': '',
+       'v': none, 't': none, 't_alt': none, 'cmp': '>', 'lo': 0, 'hi': 1, 'fail': not newer,
+       'reason': 'This spike was already handled', 'note': 'the spike must begin after the last run ended'},
+      {'k': 'dry', 'q': 'Dry outside', 'short': 'Too humid outside', 'unit': '°F dew pt out',
+       'v': odpv, 't': 60, 't_alt': 60, 'cmp': '>=', 'lo': 40, 'hi': 80, 'fail': not dry_ok,
+       'reason': 'Too humid outside (dew point ' ~ (r(odpv) if odpv is number else '?') ~ '°F)'},
+    ] -%}
+  {%- else -%}
+    {%- set gates = [
+      {'k': 'owned', 'q': 'Fans still ours', 'short': 'No fans left to run', 'unit': 'fans',
+       'v': owned | length, 't': none, 't_alt': none, 'cmp': '<', 'lo': 0, 'hi': 2,
+       'fail': run.x is defined or owned | length == 0,
+       'reason': 'Stopping the fans (retrying)' if run.x is defined else 'Someone turned the fans off',
+       'note': 'a fan someone turns off is released'},
+      {'k': 'maxrun', 'q': 'Under 60 min', 'short': 'Ran 60 min', 'unit': 'min',
+       'v': (elapsed / 60) | round(1), 't': 60, 't_alt': 60, 'cmp': '>=', 'lo': 0, 'hi': 70,
+       'fail': elapsed >= 3600, 'reason': 'Reached the 60-min limit'},
+      {'k': 'dry', 'q': 'Still dry outside', 'short': 'Humid outside', 'unit': '°F dew pt out',
+       'v': odpv, 't': 62, 't_alt': 62, 'cmp': '>=', 'lo': 40, 'hi': 80, 'fail': humid_end,
+       'reason': 'Outdoor air got humid (dew point ' ~ (r(odpv) if odpv is number else '?') ~ '°F)'},
+      {'k': 'clearing', 'q': 'Air still smoky', 'short': 'Air cleared', 'unit': 'µg/m³ PM2.5',
+       'v': pmv, 't': clear_to, 't_alt': clear_to, 'cmp': '<=', 'lo': 0, 'hi': [60, (pmv or 0) * 1.2] | max,
+       'fail': cleared, 'reason': 'Air is back near where it started',
+       'rule': 'starting level ' ~ (run.b | default(0)) ~ ' + 3', 'rule_alt': 'starting level ' ~ (run.b | default(0)) ~ ' + 3',
+       'note': 'can’t end on this before 10 min' if elapsed < 600 else none},
+    ] -%}
+  {%- endif -%}
+  {%- set first = namespace(i=-1) -%}
+  {%- for g in gates -%}
+    {%- if first.i < 0 and g.fail -%}{%- set first.i = loop.index0 -%}{%- endif -%}
+  {%- endfor -%}
+  {%- if not active -%}
+    {%- set state = 'Starting the fans' if start else gates[first.i].reason -%}
+  {%- elif end -%}
+    {%- set state = 'Ending: ' ~ gates[first.i].reason -%}
+  {%- elif would_end -%}
+    {%- set state = 'Holding for the laundry room' -%}
+  {%- else -%}
+    {%- set state = 'Running' -%}
+  {%- endif -%}
+  {{- {'active': active, 'start': start, 'end': end, 'spike_new': spike_new, 'laundry_busy': laundry_busy,
+       'elapsed': elapsed, 'state': state, 'mode': 'running' if active else 'idle', 'decided': first.i,
+       'gates': gates} | to_json -}}
+{%- endmacro -%}
+
+{#- Live inputs -> decide() plus what the Logic tab needs to present it. -#}
+{%- macro live() -%}
+  {%- set raw = states('input_text.kitchen_air_exhaust_run') -%}
+  {%- set run = (raw | from_json) if raw.startswith('{') else {} -%}
+  {%- set spike = states.binary_sensor.kitchen_air_spike -%}
+  {%- set d = decide(run, as_timestamp(now()) | int,
+        states('sensor.airgradient_living_room_pm2_5'), states('sensor.living_room_pm2_5_1h_low'),
+        states('sensor.outdoor_dewpoint'), is_state('binary_sensor.kitchen_air_spike', 'on'),
+        as_timestamp(spike.last_changed) if spike else 0,
+        is_state('input_boolean.laundry_steamer_running', 'on'),
+        states('sensor.laundry_room_sensor_humidity')) | from_json -%}
+  {%- set idle = not d.active -%}
+  {{- dict(d, kind='ladder',
+       tone=('good' if d.start or (d.active and not d.end) else 'paused'),
+       icon=('mdi:fan' if d.active else 'mdi:stove'),
+       kicker=('Exhaust running' if d.active and not d.end else ('Ending the run' if d.end else ('Starting' if d.start else 'Fans idle'))),
+       mode_label=('RUNNING' if d.active else 'IDLE'),
+       mode_text=('<b>Running</b>: every minute it checks whether to keep going. The first check that fails ends the run, except that it waits (up to 3 h) while the laundry room is steaming or humid.'
+                  if d.active else
+                  '<b>Idle</b>: all of these must pass to start the half-bath and laundry fans. Dry weather only, since every CFM pulled out comes back in through the fresh-air intake.'),
+       terminal=('All pass → keep running' if d.active else 'All pass → start the fans'),
+       run=run, laundry_busy=d.laundry_busy,
+       summary=('PM2.5 ' ~ states('sensor.airgradient_living_room_pm2_5') ~ ' · 1-h low ' ~ states('sensor.living_room_pm2_5_1h_low')
+                ~ ' · outdoor dew point ' ~ states('sensor.outdoor_dewpoint') ~ '°F')) | to_json -}}
+{%- endmacro -%}

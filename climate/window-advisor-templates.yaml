@@ -1,0 +1,182 @@
+# Window advisor (2026-09-27). Reference copy of the block appended to
+# /Volumes/config/templates.yaml -- edit here, then re-sync that block.
+# Plan + review notes: ~/.claude/plans/comfort-window-advisor.md
+#
+#   sensor.window_forecast          next 12 met.no hours with dew point
+#   sensor.window_advice            "Good" | blocking reason | "Blind: ..."
+#   sensor.window_advice_trace      the whole ladder, for the Logic tab
+#   binary_sensor.window_weather_good   debounced Good (20 min on / 10 min off)
+#   binary_sensor.window_hazard     immediate: rain now, gusts, smoke/dust
+#
+# window_advice switches from "enter" to "stay" thresholds once
+# window_weather_good is on (hysteresis), so open/close advice doesn't flap.
+
+# Hourly forecast, refreshed every 30 min. On a failed fetch the previous
+# hours and fetched_at are kept; window_advice goes Blind once they are
+# older than 90 min, so a dead weather integration never reads as "dry".
+- trigger:
+    - trigger: time_pattern
+      minutes: /30
+    - trigger: homeassistant
+      event: start
+    - trigger: event
+      event_type: event_template_reloaded
+    - trigger: state
+      entity_id: weather.forecast_home
+      from: unavailable
+  action:
+    - action: weather.get_forecasts
+      target:
+        entity_id: weather.forecast_home
+      data:
+        type: hourly
+      response_variable: fc
+      continue_on_error: true
+  sensor:
+    - unique_id: window_forecast
+      name: Window Forecast
+      icon: mdi:weather-cloudy-clock
+      state: >-
+        {% set ok = fc is defined and fc is mapping
+           and fc.get('weather.forecast_home') is mapping %}
+        {{ fc['weather.forecast_home'].forecast | length if ok
+           else this.state | int(0) }}
+      attributes:
+        fetched_at: >-
+          {% set ok = fc is defined and fc is mapping
+             and fc.get('weather.forecast_home') is mapping %}
+          {{ now().isoformat() if ok else this.attributes.get('fetched_at') }}
+        hours: >-
+          {% set ok = fc is defined and fc is mapping
+             and fc.get('weather.forecast_home') is mapping %}
+          {% if ok %}
+            {% set ns = namespace(out=[]) %}
+            {% for h in fc['weather.forecast_home'].forecast[:12]
+               if h.temperature is number and h.humidity is number
+               and h.humidity > 0 %}
+              {% set tc = (h.temperature - 32) * 5 / 9 %}
+              {% set g = log(h.humidity / 100) + 17.27 * tc / (237.3 + tc) %}
+              {% set ns.out = ns.out + [{
+                   't': h.datetime,
+                   'temp': h.temperature,
+                   'dp': ((237.3 * g / (17.27 - g)) * 9 / 5 + 32) | round(1),
+                   'precip': h.precipitation }] %}
+            {% endfor %}
+            {{ ns.out }}
+          {% else %}
+            {{ this.attributes.get('hours', []) }}
+          {% endif %}
+
+- sensor:
+    - unique_id: window_advice
+      name: Window Advice
+      icon: mdi:window-open-variant
+      # The ladder lives in custom_templates/window_advisor.jinja (source:
+      # climate/window_advisor.jinja) so the Logic tab's trace below shows the
+      # exact same decision. Replay-checked against the previous inline
+      # template: logic-view/replay-window-advisor.py (1500 cases, 0 diffs).
+      state: >-
+        {% from 'window_advisor.jinja' import window_advice %}
+        {{ (window_advice() | from_json).state }}
+      attributes:
+        summary: >-
+          {% macro f(e) %}{{ (states(e) | float | round(0) | int) if is_number(states(e)) else '?' }}{% endmacro %}
+          Outside {{ f('sensor.outdoor_temperature') }}°F, dew point {{ f('sensor.outdoor_dewpoint') }}°F · inside {{ f('sensor.indoor_temperature') }}°F, dew point {{ f('sensor.indoor_dew_point') }}°F
+        # First forecast hour that breaks the "stay open" thresholds; none =
+        # nothing bad in the next 12 hours.
+        good_until: >-
+          {% set hours = state_attr('sensor.window_forecast', 'hours') %}
+          {% set it = states('sensor.indoor_temperature') | float(72) %}
+          {% set ns = namespace(t=none) %}
+          {% if hours is list %}
+            {% for h in hours if as_timestamp(h.t, 0) >= as_timestamp(now()) - 3600 %}
+              {% if ns.t is none and (h.temp < 52 or (h.temp > it + 1 and h.temp > 74)
+                    or h.dp > 60 or (h.precip is number and h.precip > 0)) %}
+                {% set ns.t = h.t %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {{ ns.t }}
+
+    # Every gate of the ladder with its live value and both thresholds, for
+    # the Logic tab (logic-view/logic-trace-card.js). Recorder-excluded by
+    # the sensor.*_trace glob. State = key of the deciding gate.
+    - unique_id: window_advice_trace
+      name: Window Advice Trace
+      icon: mdi:head-cog-outline
+      state: >-
+        {% from 'window_advisor.jinja' import window_advice %}
+        {% set d = window_advice() | from_json %}
+        {{ 'blind' if d.state.startswith('Blind') else ('good' if d.decided < 0 else d.gates[d.decided].k) }}
+      attributes:
+        trace: >-
+          {% from 'window_advisor.jinja' import window_advice %}
+          {{ window_advice() | from_json }}
+        summary: "{{ state_attr('sensor.window_advice', 'summary') }}"
+        good_until: "{{ state_attr('sensor.window_advice', 'good_until') }}"
+        hours: >-
+          {% set hours = state_attr('sensor.window_forecast', 'hours') %}
+          {{ (hours | selectattr('t', 'defined') | list)[:12] if hours is list else [] }}
+
+- binary_sensor:
+    - unique_id: window_weather_good
+      name: Window Weather Good
+      icon: mdi:window-open-variant
+      state: "{{ is_state('sensor.window_advice', 'Good') }}"
+      availability: >-
+        {{ has_value('sensor.window_advice')
+           and not states('sensor.window_advice').startswith('Blind') }}
+      delay_on:
+        minutes: 20
+      delay_off:
+        minutes: 10
+
+    # Immediate "close the windows" conditions, no debounce. Each input
+    # counts on its own: a dead PM sensor must not hide rain. Unavailable
+    # only when all three are missing. The reason is a category (no
+    # numbers) so it only changes when the kind of hazard changes.
+    - unique_id: window_hazard
+      name: Window Hazard
+      icon: mdi:weather-lightning-rainy
+      state: >-
+        {% set rr = states('sensor.weather_station_rain_rate') %}
+        {% set gust = states('sensor.weather_station_wind_gust') %}
+        {% set pm = states('sensor.airgradient_outdoor_pm2_5') %}
+        {{ (is_number(rr) and rr | float > 0)
+           or (is_number(gust) and gust | float >= 25)
+           or (is_number(pm) and pm | float > 35) }}
+      availability: >-
+        {{ is_number(states('sensor.weather_station_rain_rate'))
+           or is_number(states('sensor.weather_station_wind_gust'))
+           or is_number(states('sensor.airgradient_outdoor_pm2_5')) }}
+      attributes:
+        reason: >-
+          {% set rr = states('sensor.weather_station_rain_rate') %}
+          {% set gust = states('sensor.weather_station_wind_gust') %}
+          {% set pm = states('sensor.airgradient_outdoor_pm2_5') %}
+          {% if is_number(rr) and rr | float > 0 %}It's raining
+          {%- elif is_number(gust) and gust | float >= 25 %}Strong wind gusts
+          {%- elif is_number(pm) and pm | float > 35 %}Smoke or dust outside
+          {%- else %}none{% endif %}
+
+    # House too hot, too cold or too muggy for 15 min. Only acted on while
+    # Windows Open is on (the AC is off then), as the safety net for a
+    # forgotten switch.
+    - unique_id: window_indoor_extreme
+      name: Window Indoor Extreme
+      icon: mdi:home-thermometer
+      state: >-
+        {% set it = states('sensor.indoor_temperature') | float(70) %}
+        {% set idp = states('sensor.indoor_dew_point') | float(50) %}
+        {{ it > 80 or it < 62 or idp > 62 }}
+      availability: "{{ is_number(states('sensor.indoor_temperature')) }}"
+      delay_on:
+        minutes: 15
+      attributes:
+        reason: >-
+          {% set it = states('sensor.indoor_temperature') | float(70) %}
+          {% set idp = states('sensor.indoor_dew_point') | float(50) %}
+          {% if it > 80 %}House is {{ it | round(0) | int }}°F
+          {%- elif it < 62 %}House is down to {{ it | round(0) | int }}°F
+          {%- elif idp > 62 %}Indoor dew point is {{ idp | round(0) | int }}°F
+          {%- else %}none{% endif %}
