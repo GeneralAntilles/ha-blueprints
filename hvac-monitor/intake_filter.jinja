@@ -1,0 +1,64 @@
+{#- Fresh-air intake filter clock (2026-09-30). Deployed to
+    /config/custom_templates/intake_filter.jinja; used by
+    sensor.fresh_air_intake_filter_load (the per-minute accumulator),
+    sensor.fresh_air_intake_filter_life_used and sensor.fresh_air_intake_filter_trace
+    (the Logic tab), so the view can never disagree with the clock.
+
+    Load is counted in "equivalent days": one = a peak-summer day of blower
+    (720 min) with the intake open at outdoor PM10 10 ug/m3. step() and life()
+    are pure (inputs passed in) so logic-view/replay-intake-filter.py can
+    check them against the previous inline templates. -#}
+
+{#- One minute of loading. actions: hvac_action of each thermostat. -#}
+{%- macro step(actions, intake_open, pm10_raw) -%}
+  {%- set blower = actions | select('in', ['cooling', 'heating', 'fan']) | list | count > 0 -%}
+  {%- set pm = pm10_raw | float(none) if pm10_raw is is_number else none -%}
+  {%- set w = [[pm10_raw | float(10) / 10, 0.5] | max, 3] | min -%}
+  {%- set counting = blower and intake_open -%}
+  {{- {'blower': blower, 'open': intake_open, 'counting': counting, 'pm10': pm, 'w': w,
+       'inc': (w / 720) if counting else 0} | to_json -}}
+{%- endmacro -%}
+
+{#- Life used: whichever is further along of the load vs its target and a
+    365-day calendar backstop (a damp intake can go musty before it loads). -#}
+{%- macro life(load_raw, target_raw, changed_raw, now_ts) -%}
+  {%- set load = load_raw | float(0) -%}
+  {%- set target = target_raw | float(180) -%}
+  {%- set changed = changed_raw | float(0) -%}
+  {%- set logged = changed > 946684800 -%}
+  {%- set age = (now_ts - changed) / 86400 if logged else 0 -%}
+  {{- {'load': load, 'target': target, 'pct': ([load / target, age / 365] | max * 100) | round(0),
+       'usage_pct': (load / target * 100) | round(1), 'cal_pct': (age / 365 * 100) | round(1),
+       'age_days': ((now_ts - changed) / 86400) | int if logged else none,
+       'limit': 'calendar' if age / 365 > load / target else 'usage',
+       'changed': changed if logged else none,
+       'due_by': (changed + 365 * 86400) if logged else none} | to_json -}}
+{%- endmacro -%}
+
+{#- Live inputs, gathered in one place. The load accumulator calls only
+    step_live() and life-used only life_live(), so a failure reading one set
+    of inputs can't take down the other sensor. -#}
+{%- macro step_live() -%}
+  {%- set tstats = expand('climate.studio_upstairs_thermostat', 'climate.downstairs') -%}
+  {{- step(tstats | map(attribute='attributes.hvac_action') | list,
+           is_state('input_boolean.fresh_air_intake_open', 'on'),
+           states('sensor.airgradient_outdoor_pm10')) -}}
+{%- endmacro -%}
+
+{%- macro life_live() -%}
+  {{- life(states('sensor.fresh_air_intake_filter_load'),
+           states('input_number.fresh_air_intake_filter_load_target'),
+           state_attr('input_datetime.fresh_air_intake_filter_changed', 'timestamp'),
+           as_timestamp(now())) -}}
+{%- endmacro -%}
+
+{#- Everything the Logic tab needs to explain the clock. -#}
+{%- macro live() -%}
+  {%- set labels = {'climate.studio_upstairs_thermostat': 'Upstairs', 'climate.downstairs': 'Downstairs'} -%}
+  {%- set ns = namespace(t=[]) -%}
+  {%- for t in expand(labels.keys() | list) -%}
+    {%- set ns.t = ns.t + [{'name': labels[t.entity_id], 'action': t.attributes.hvac_action | string}] -%}
+  {%- endfor -%}
+  {{- {'kind': 'clock', 'step': step_live() | from_json, 'life': life_live() | from_json, 'thermostats': ns.t,
+       'ref_pm10': 10, 'w_min': 0.5, 'w_max': 3, 'day_min': 720, 'backstop_days': 365} | to_json -}}
+{%- endmacro -%}

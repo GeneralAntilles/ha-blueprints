@@ -1,0 +1,50 @@
+# Sensor staleness watchdog (2026-09-27). Reference copy of the block between
+# the "staleness" markers in /Volumes/config/templates.yaml. Tiers come from
+# staleness-calibrate.py (entity labels "Stale 30m" ... "Stale 72h").
+#
+# A labelled sensor is stale when its last_reported (last time HA wrote its
+# state, changed or not) is older than its tier. unavailable/unknown sensors
+# are left to the Health tab's unavailable list. `devices` groups items so a
+# dead weather station reads as one line, not twelve.
+- trigger:
+    - trigger: time_pattern
+      minutes: /5
+    - trigger: homeassistant
+      event: start
+  action:
+    - variables:
+        items: >-
+          {% set tiers = [['stale_30m', 1800], ['stale_2h', 7200], ['stale_6h', 21600],
+                          ['stale_24h', 86400], ['stale_72h', 259200]] %}
+          {% set ns = namespace(l=[]) %}
+          {% for t in tiers %}
+            {% for e in label_entities(t[0]) %}
+              {% set s = states[e] %}
+              {% if s is not none and s.state not in ['unavailable', 'unknown'] %}
+                {% set age = (now() - s.last_reported).total_seconds() %}
+                {% if age > t[1] %}
+                  {% set dev = device_id(e) %}
+                  {% set ns.l = ns.l + [{'entity': e, 'name': s.name,
+                       'device': (device_attr(dev, 'name_by_user') or device_attr(dev, 'name')) if dev else s.name,
+                       'age_h': (age / 3600) | round(1), 'tier': t[0][6:]}] %}
+                {% endif %}
+              {% endif %}
+            {% endfor %}
+          {% endfor %}
+          {{ ns.l | sort(attribute='age_h', reverse=true) }}
+  sensor:
+    - unique_id: stale_sensors
+      name: Stale Sensors
+      icon: mdi:clock-alert-outline
+      unit_of_measurement: sensors
+      state: "{{ items | count }}"
+      attributes:
+        items: "{{ items }}"
+        devices: >-
+          {% set ns = namespace(d={}) %}
+          {% for i in items %}
+            {% set cur = ns.d.get(i.device, {'count': 0, 'age_h': 0}) %}
+            {% set ns.d = dict(ns.d, **{i.device: {'count': cur.count + 1,
+                 'age_h': [cur.age_h, i.age_h] | max}}) %}
+          {% endfor %}
+          {{ ns.d }}

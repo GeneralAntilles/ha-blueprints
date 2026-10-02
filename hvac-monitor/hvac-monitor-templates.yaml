@@ -1,0 +1,284 @@
+# HVAC health monitor - template entities (2026-09-27). Reference copy of the
+# block between the "hvac monitor" markers in /Volumes/config/templates.yaml.
+# Design + replay validation: ~/.claude/plans/hvac-health-monitor.md, README.md.
+
+# Rolling buffer of whole-house per-leg power: [epoch_s, leg A W, leg B W]
+# samples from the last 10 minutes (max 150). The Shelly updates A and B as a
+# near-simultaneous pair every ~11 s, so a sample within 1 s of the previous
+# one replaces it instead of adding a row. Glitch readings (<= 0 W,
+# non-numeric) are skipped. The cooling-cycle
+# automation reads windows out of it, the way the replay did, because HA
+# templates cannot look back in history. Excluded from the recorder (it
+# changes every few seconds); attributes restore across restarts.
+- trigger:
+    - trigger: state
+      entity_id:
+        - sensor.energy_monitor_phase_a_power
+        - sensor.energy_monitor_phase_b_power
+      not_to:
+        - unavailable
+        - unknown
+  sensor:
+    - unique_id: hvac_leg_buffer
+      name: HVAC Leg Buffer
+      icon: mdi:sine-wave
+      state: "{{ now().isoformat() }}"
+      attributes:
+        s: >-
+          {% set prev = this.attributes.get('s', []) if this.attributes is defined else [] %}
+          {% set a = states('sensor.energy_monitor_phase_a_power') %}
+          {% set b = states('sensor.energy_monitor_phase_b_power') %}
+          {% set t = as_timestamp(now()) | round(1) %}
+          {% set keep = prev | selectattr('0', '>=', t - 600) | list %}
+          {% if is_number(a) and is_number(b) and a | float > 0 and b | float > 0 %}
+            {% if keep | count > 0 and t - keep[-1][0] < 1 %}{% set keep = keep[:-1] %}{% endif %}
+            {{ (keep + [[t, a | float | round(0) | int, b | float | round(0) | int]])[-150:] }}
+          {% else %}
+            {{ keep[-150:] }}
+          {% endif %}
+
+# Per-cycle metrics from the cooling-cycle automation's `hvac_monitor` events.
+- trigger:
+    - trigger: event
+      event_type: hvac_monitor
+      event_data:
+        kind: start_measured
+  sensor:
+    - unique_id: hvac_compressor_start_watts
+      name: HVAC Compressor Start Watts
+      icon: mdi:heat-pump
+      unit_of_measurement: W
+      device_class: power
+      state: "{{ trigger.event.data.data.watts }}"
+      attributes:
+        outdoor_f: "{{ trigger.event.data.data.tout }}"
+        expected_w: "{{ trigger.event.data.data.expected }}"
+        residual_w: "{{ trigger.event.data.data.residual }}"
+        masked: "{{ trigger.event.data.data.masked }}"
+        at: "{{ now().isoformat() }}"
+- trigger:
+    - trigger: event
+      event_type: hvac_monitor
+      event_data:
+        kind: stop
+  sensor:
+    - unique_id: hvac_compressor_run_minutes
+      name: HVAC Compressor Last Run
+      icon: mdi:timer-outline
+      unit_of_measurement: min
+      state: "{{ trigger.event.data.data.run_min }}"
+      attributes:
+        at: "{{ now().isoformat() }}"
+- trigger:
+    - trigger: event
+      event_type: hvac_monitor
+      event_data:
+        kind: blower
+  sensor:
+    - unique_id: hvac_blower_watts
+      name: HVAC Blower Watts
+      icon: mdi:fan
+      unit_of_measurement: W
+      device_class: power
+      # Only confident measurements update the value; others land in attributes.
+      state: >-
+        {{ trigger.event.data.data.watts if trigger.event.data.data.confident
+           else this.state }}
+      attributes:
+        last_attempt_w: "{{ trigger.event.data.data.watts }}"
+        last_attempt_confident: "{{ trigger.event.data.data.confident }}"
+        last_attempt_reason: "{{ trigger.event.data.data.why }}"
+        at: "{{ now().isoformat() }}"
+
+- binary_sensor:
+    - unique_id: hvac_compressor_running
+      name: HVAC Compressor Running
+      icon: mdi:heat-pump-outline
+      state: >-
+        {% set r = states('input_text.hvac_cycle') %}
+        {{ r.startswith('{') and (r | from_json).get('p') == 'r' }}
+    - unique_id: hvac_heat_call
+      name: HVAC Heat Call
+      icon: mdi:fire
+      state: >-
+        {{ is_state_attr('climate.downstairs', 'hvac_action', 'heating')
+           or is_state_attr('climate.studio_upstairs_thermostat', 'hvac_action', 'heating') }}
+
+# Event log: today's / yesterday's stats, recent incidents (for "2 within an
+# hour"), and incidents held for the morning. Rolls the day over on the
+# first event after midnight or at 00:00:30.
+- trigger:
+    - trigger: event
+      event_type: hvac_monitor
+    - trigger: time
+      at: '00:00:30'
+  sensor:
+    - unique_id: hvac_monitor_log
+      name: HVAC Monitor Log
+      icon: mdi:clipboard-pulse-outline
+      state: >-
+        {{ trigger.event.data.kind if trigger.platform == 'event' else 'rollover' }}
+      attributes:
+        day: "{{ now().date().isoformat() }}"
+        today: >-
+          {% set new_day = this.attributes.get('day') != now().date().isoformat() %}
+          {% set t = {} if new_day else this.attributes.get('today', {}) %}
+          {% if trigger.platform == 'event' %}
+            {% set k = trigger.event.data.kind %}
+            {% set d = trigger.event.data.data %}
+            {% set t = dict(t, **{k: t.get(k, 0) + 1}) %}
+            {% if k == 'stop' %}
+              {% set t = dict(t, runs=(t.get('runs', []) + [d.run_min])[-200:]) %}
+            {% endif %}
+          {% endif %}
+          {{ t }}
+        # Only the immediately preceding day is promoted; after longer
+        # downtime yesterday is empty rather than days-old.
+        yesterday: >-
+          {% set today = now().date().isoformat() %}
+          {% set prev_day = (now().date() - timedelta(days=1)).isoformat() %}
+          {% set stored = this.attributes.get('day') %}
+          {% if stored == today %}{{ this.attributes.get('yesterday', {}) }}
+          {% elif stored == prev_day %}{{ dict(this.attributes.get('today', {}), date=stored) }}
+          {% else %}{{ {} }}{% endif %}
+        recent: >-
+          {% set r = this.attributes.get('recent', []) %}
+          {% if trigger.platform == 'event' and trigger.event.data.kind in
+                ['no_start', 'no_restart', 'mid_call_stop', 'changeover', 'uncertain_stop',
+                 'blower_missing', 'heat_no_response'] %}
+            {% set r = (r + [[as_timestamp(now()) | int, trigger.event.data.kind,
+                              trigger.event.data.data]])[-25:] %}
+          {% endif %}
+          {{ r }}
+        held: >-
+          {% set h = this.attributes.get('held', []) %}
+          {% if trigger.platform == 'event' %}
+            {% set k = trigger.event.data.kind %}
+            {% if k == 'held_sent' %}
+              {% set h = [] %}
+            {% elif trigger.event.data.get('held') %}
+              {% set h = (h + [[as_timestamp(now()) | int, k, trigger.event.data.data]])[-20:] %}
+            {% endif %}
+          {% endif %}
+          {{ h }}
+        heat_responses: >-
+          {% set h = this.attributes.get('heat_responses', []) %}
+          {% if trigger.platform == 'event' and trigger.event.data.kind == 'heat_response'
+                and trigger.event.data.data.gated %}
+            {% set h = (h + [trigger.event.data.data.watts])[-30:] %}
+          {% endif %}
+          {{ h }}
+
+# Detector events + cycle state for the Logic tab (logic-view/logic-trace-card.js,
+# kind 'cycle'). Keeps the last 30 cooling-cycle events with timestamps. The
+# thresholds come from the events themselves: the detector echoes the constants
+# it tested against, so this view can't drift from it. Recorder-excluded by the
+# sensor.*_trace glob. panel_min_on is the Aprilaire 6203's fixed 4-min minimum
+# cooling ON time; digest_starts mirrors house_health_daily_digest's > 60.
+- trigger:
+    - trigger: event
+      event_type: hvac_monitor
+    - trigger: state
+      entity_id: input_text.hvac_cycle
+    - trigger: time_pattern
+      minutes: /5
+  sensor:
+    - unique_id: hvac_cycle_trace
+      name: HVAC Cycle Trace
+      icon: mdi:head-cog-outline
+      state: >-
+        {% set r = states('input_text.hvac_cycle') %}
+        {% set p = (r | from_json).get('p') if r.startswith('{') else 'i' %}
+        {{ {'r': 'running', 'x': 'classifying'}.get(p, 'idle') }}
+      attributes:
+        trace: >-
+          {% set prev = (this.attributes.get('trace') or {}).get('events', []) %}
+          {% set keep = ['start', 'start_measured', 'stop', 'blower', 'blower_missing', 'mid_call_stop',
+                         'changeover', 'uncertain_stop', 'no_start', 'no_restart'] %}
+          {% if trigger.platform == 'event' and trigger.event.data.kind in keep %}
+            {% set prev = (prev + [{'t': as_timestamp(now()) | int, 'kind': trigger.event.data.kind,
+                                    'data': trigger.event.data.data}])[-30:] %}
+          {% endif %}
+          {% set r = states('input_text.hvac_cycle') %}
+          {% set log = state_attr('sensor.hvac_monitor_log', 'today') or {} %}
+          {{ {'kind': 'cycle', 'events': prev,
+              'rec': (r | from_json) if r.startswith('{') else {},
+              'runs_today': log.get('runs', []), 'starts_today': log.get('start', 0),
+              'panel_min_on': 4, 'digest_starts': 60,
+              'series': {'a': 'sensor.energy_monitor_phase_a_power',
+                         'b': 'sensor.energy_monitor_phase_b_power',
+                         'call': 'sensor.ac_compressor_state',
+                         'running': 'binary_sensor.hvac_compressor_running'}} }}
+
+# Fresh-air intake filter (12x12x1 MERV 12 on the 8" exterior-wall ventilator)
+# usage clock, in "equivalent days": one = a peak-summer day of blower (720
+# min) with the intake open at outdoor PM10 10 ug/m3. Each minute the blower
+# runs (either ecobee cooling/heating/fan) while input_boolean.fresh_air_intake_open
+# is on adds PM weight / 720, weight = PM10 / 10 clamped 0.5-3 (1 when the
+# AirGradient is unavailable). The AirGradient reads mostly fine particles,
+# which MERV 12 catches well, and the wall intake draws no attic dust.
+# The logic lives in custom_templates/intake_filter.jinja (source:
+# hvac-monitor/intake_filter.jinja), shared with the Logic tab's trace;
+# replay-checked against the previous inline templates
+# (logic-view/replay-intake-filter.py, 1500 cases, 0 diffs).
+# Resets on the Log Intake Filter Change button; restores across restarts.
+# Guarded against losing the count: if the state is ever non-numeric (a
+# failed render leaves it unavailable), it continues from last_good, the
+# previous minute's value, instead of starting over from 0.
+- trigger:
+    - trigger: time_pattern
+      minutes: /1
+    - trigger: state
+      entity_id: input_button.fresh_air_intake_filter_changed
+      id: reset
+  sensor:
+    - unique_id: fresh_air_intake_filter_load
+      name: Fresh Air Intake Filter Load
+      icon: mdi:air-filter
+      unit_of_measurement: d
+      state_class: measurement
+      state: >-
+        {% from 'intake_filter.jinja' import step_live %}
+        {% set last = this.attributes.get('last_good') %}
+        {% set prev = this.state | float if this.state is is_number
+                      else (last | float if last is is_number else 0) %}
+        {% if trigger.id == 'reset' %}0
+        {% else %}{{ (prev + (step_live() | from_json).inc) | round(4) }}{% endif %}
+      attributes:
+        last_good: >-
+          {% set last = this.attributes.get('last_good') %}
+          {{ 0 if trigger.id == 'reset' else (this.state | float if this.state is is_number
+             else (last | float if last is is_number else 0)) }}
+
+# Percent of intake filter life used: whichever is further along of the load
+# vs input_number.fresh_air_intake_filter_load_target and a 365-day calendar
+# backstop (a damp wall intake can go musty before it loads up).
+- sensor:
+    - unique_id: fresh_air_intake_filter_life_used
+      name: Fresh Air Intake Filter Life Used
+      icon: mdi:air-filter
+      unit_of_measurement: '%'
+      state_class: measurement
+      state: >-
+        {% from 'intake_filter.jinja' import life_live %}
+        {{ (life_live() | from_json).pct }}
+      attributes:
+        age_days: >-
+          {% from 'intake_filter.jinja' import life_live %}
+          {{ (life_live() | from_json).age_days }}
+        limit: >-
+          {% from 'intake_filter.jinja' import life_live %}
+          {{ (life_live() | from_json).limit }}
+
+    # The whole clock for the Logic tab (logic-view/logic-trace-card.js).
+    # Recorder-excluded by the sensor.*_trace glob.
+    - unique_id: fresh_air_intake_filter_trace
+      name: Fresh Air Intake Filter Trace
+      icon: mdi:head-cog-outline
+      state: >-
+        {% from 'intake_filter.jinja' import live %}
+        {{ 'counting' if (live() | from_json).step.counting else 'paused' }}
+      attributes:
+        trace: >-
+          {% from 'intake_filter.jinja' import live %}
+          {{ live() | from_json }}

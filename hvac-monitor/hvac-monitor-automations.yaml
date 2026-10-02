@@ -1,0 +1,512 @@
+# HVAC health monitor - automations (2026-09-27). Reference copies of
+# automations stored in /Volumes/config/automations.yaml (pushed via
+# /api/config/automation/config/<id>). Templates: hvac-monitor-templates.yaml.
+
+# ---------------------------------------------------------------------------
+# Cooling cycles: compressor start/stop detection from per-leg power, the
+# rules validated by replaying 3 days of data (plan "Revisions"):
+#   START  both legs rise >= 400 W over their 180-s minimum, balanced, within
+#          120 s of (or during) a cooling call. Baselines = those minima.
+#   STEP   l = min(dA, dB) at start + 60 s (balanced component only).
+#   STOP   vs medians of samples >= 60 s after start and 30-120 s old, both
+#          legs fall >= max(300, 0.6 l), balanced, held >= 30 s.
+#   CLASS  150 s after the drop: call still on -> mid-call stop (changeover
+#          if a heat call exists), else a normal stop; blower watts measured
+#          then from the buffer around the drop.
+#   FAILSAFE call off > 6 min while "running" -> uncertain stop.
+# input_text.hvac_cycle holds the whole state as compact JSON and is written
+# only when it changes:
+#   p phase i/r/x (idle/running/stopped-awaiting-classification)
+#   c/co call on/off ts, s start ts, ba/bb baselines, l settled step,
+#   lo first-stop-condition ts, d drop ts, n no-start latch, rs resume
+#   deadline after a mid-call stop, m masked (EV), bm blower-miss streak,
+#   mc recent mid-call stop ts list.
+# Everything it concludes goes out as `hvac_monitor` events {kind, data,
+# held}; the log sensor and the alert automation consume those.
+- id: hvac_monitor_cooling_cycles
+  alias: 'HVAC Monitor: Cooling Cycles'
+  description: >-
+    Detects compressor starts/stops from whole-house per-leg power and
+    classifies each cycle. Source: ha-blueprints/hvac-monitor/.
+  # Latest-wins: every run re-reads current states, and call edges are
+  # derived from the record (k = last seen call state), so a dropped run
+  # loses nothing.
+  mode: single
+  max_exceeded: silent
+  triggers:
+    - trigger: state
+      entity_id: sensor.hvac_leg_buffer
+      id: tick
+    - trigger: time_pattern
+      minutes: /1
+      id: tick
+    - trigger: homeassistant
+      event: start
+      id: boot
+    - trigger: state
+      entity_id: sensor.ac_compressor_state
+      id: tick
+  actions:
+    - variables:
+        rec: >-
+          {% set r = states('input_text.hvac_cycle') %}
+          {{ (r | from_json) if r.startswith('{') else {} }}
+        out: >-
+          {# Detector constants, named once and echoed in the events so the
+             Logic tab shows exactly what each decision was tested against. #}
+          {% set START_W = 400 %}{% set BAL = 0.35 %}{% set STOP_MIN_W = 300 %}{% set STOP_FRAC = 0.6 %}
+          {% set MODEL_A = 23.0 %}{% set MODEL_B = 21 %}{% set MODEL_SD = 172 %}{% set BLOWER_MIN_W = 60 %}
+          {% set now_ts = as_timestamp(now()) | int %}
+          {% set buf = state_attr('sensor.hvac_leg_buffer', 's') or [] %}
+          {% set call = states('sensor.ac_compressor_state') | float(0) >= 1 %}
+          {% set heat = is_state('binary_sensor.hvac_heat_call', 'on') %}
+          {% set fan_on = is_state_attr('climate.downstairs', 'fan_mode', 'on')
+                          or is_state_attr('climate.studio_upstairs_thermostat', 'fan_mode', 'on') %}
+          {% set ev_change = (states.sensor.wheels_charging is not none
+                and now_ts - as_timestamp(states.sensor.wheels_charging.last_changed) < 180)
+             or (states.sensor.wheels_charger_power is not none
+                and now_ts - as_timestamp(states.sensor.wheels_charger_power.last_changed) < 180) %}
+          {% set tout = states('sensor.outdoor_temperature') | float(0) %}
+          {# held = held-tier incident during quiet hours: queued for 07:00 #}
+          {% set indoor = states('sensor.indoor_temperature') | float(72) %}
+          {% set quiet = (now().hour >= 22 or now().hour < 7) and 60 <= indoor <= 80 %}
+          {% set day = now().date().toordinal() %}
+          {% set R = namespace(p=rec.get('p', 'i'), c=rec.get('c', 0), co=rec.get('co', 0),
+                s=rec.get('s', 0), ba=rec.get('ba', 0), bb=rec.get('bb', 0), l=rec.get('l', 0),
+                lo=rec.get('lo', 0), d=rec.get('d', 0), n=rec.get('n', 0), rs=rec.get('rs', 0),
+                m=rec.get('m', 0), bm=rec.get('bm', 0), mc=rec.get('mc', []), k=rec.get('k', -1),
+                dd=rec.get('dd', 0), dc=rec.get('dc', 0)) %}
+          {% set E = namespace(l=[]) %}
+          {% if R.dd != day %}{% set R.dd = day %}{% set R.dc = 0 %}{% endif %}
+          {# call edges from the last seen call state (k: -1 unknown, 0, 1) #}
+          {% if call and R.k == 0 %}{% set R.c = now_ts %}{% set R.n = 0 %}{% set R.rs = 0 %}{% endif %}
+          {% if not call and R.k == 1 %}{% set R.co = now_ts %}{% set R.rs = 0 %}{% endif %}
+          {% if call and R.k == -1 %}{% set R.c = now_ts %}{% set R.n = 1 %}{% endif %}
+          {% if not call and R.co < R.c %}{% set R.co = now_ts %}{% endif %}
+          {% set R.k = 1 if call else 0 %}
+          {# A call already in progress when we first see it (HA start, first
+             deploy) has no observed edge: latch no-start off for it. #}
+          {% if call and R.c == 0 %}{% set R.c = now_ts %}{% set R.n = 1 %}{% endif %}
+          {# After a restart the start may have happened while HA was down. #}
+          {% if trigger.id == 'boot' and call %}{% set R.n = 1 %}{% endif %}
+          {% set fresh = buf | count > 5 and now_ts - buf[-1][0] <= 120 %}
+          {# an EV change while awaiting classification masks the cycle too #}
+          {% if R.p == 'x' and ev_change %}{% set R.m = 1 %}{% endif %}
+          {% if fresh %}
+            {% set A = buf[-1][1] %}{% set B = buf[-1][2] %}
+            {# ---------------- idle: look for a start / missing start --------------- #}
+            {% if R.p == 'i' %}
+              {% set W = namespace(a=[], b=[]) %}
+              {% for x in buf if now_ts - x[0] <= 180 %}
+                {% set W.a = W.a + [x[1]] %}{% set W.b = W.b + [x[2]] %}
+              {% endfor %}
+              {% set ma = W.a | min %}{% set mb = W.b | min %}
+              {% set ra = A - ma %}{% set rb = B - mb %}
+              {% set near = call or (R.c > 0 and now_ts - R.c <= 120) %}
+              {% if near and ra >= START_W and rb >= START_W and (ra - rb) | abs < BAL * [ra, rb] | max %}
+                {% set R.p = 'r' %}{% set R.s = now_ts %}{% set R.ba = ma %}{% set R.bb = mb %}
+                {% set R.l = 0 %}{% set R.lo = 0 %}{% set R.rs = 0 %}
+                {% set R.m = 1 if ev_change else 0 %}
+                {% set E.l = E.l + [{'kind': 'start', 'data': {'rise_a': ra, 'rise_b': rb,
+                     'need_w': START_W, 'bal_max': BAL, 'during_call': call}}] %}
+              {% elif call and R.rs > 0 and now_ts > R.rs %}
+                {% set E.l = E.l + [{'kind': 'no_restart', 'held': quiet,
+                     'data': {'since_min': ((now_ts - R.d) / 60) | round(1)}}] %}
+                {% set R.rs = 0 %}
+              {% elif call and R.c > 0 and R.n == 0 and R.rs == 0 and now_ts - R.c >= 330
+                      and R.s < R.c - 120 %}
+                {% set R.n = 1 %}
+                {% set E.l = E.l + [{'kind': 'no_start', 'held': quiet,
+                     'data': {'call_min': ((now_ts - R.c) / 60) | round(1), 'masked': ev_change}}] %}
+              {% endif %}
+            {# ---------------- running: settle, then watch for the stop ---------- #}
+            {% elif R.p == 'r' %}
+              {% set age = now_ts - R.s %}
+              {% if R.l == 0 and age >= 60 %}
+                {% set da = A - R.ba %}{% set db = B - R.bb %}
+                {% set R.l = [[da, db] | min, 300] | max %}
+                {% set expected = (MODEL_A * tout - MODEL_B) | round(0) %}
+                {% set E.l = E.l + [{'kind': 'start_measured', 'data': {'watts': da + db,
+                     'tout': tout, 'expected': expected, 'residual': (da + db - expected) | round(0),
+                     'masked': R.m == 1, 'model_a': MODEL_A, 'model_b': MODEL_B, 'model_sd': MODEL_SD,
+                     'step_w': R.l}}] %}
+              {% endif %}
+              {% if not call and R.co > 0 and now_ts - R.co > 360 and age > 360 %}
+                {% set R.p = 'i' %}{% set R.lo = 0 %}
+                {% set E.l = E.l + [{'kind': 'uncertain_stop',
+                     'data': {'run_min': (age / 60) | round(1)}}] %}
+              {% elif R.l > 0 %}
+                {% set F = namespace(a=[], b=[]) %}
+                {% for x in buf if x[0] >= R.s + 60 and 30 <= now_ts - x[0] <= 120 %}
+                  {% set F.a = F.a + [x[1]] %}{% set F.b = F.b + [x[2]] %}
+                {% endfor %}
+                {% set cond = false %}
+                {% if F.a | count > 0 %}
+                  {% set sa = F.a | sort %}{% set sb = F.b | sort %}
+                  {% set fa = sa[(sa | count) // 2] - A %}{% set fb = sb[(sb | count) // 2] - B %}
+                  {% set thr = [STOP_MIN_W, STOP_FRAC * R.l] | max %}
+                  {% set cond = fa >= thr and fb >= thr and (fa - fb) | abs < BAL * [fa, fb] | max %}
+                {% endif %}
+                {% if cond %}
+                  {% if R.lo == 0 %}{% set R.lo = now_ts %}{% endif %}
+                  {% if now_ts - R.lo >= 30 %}
+                    {% set R.p = 'x' %}{% set R.d = R.lo %}{% set R.lo = 0 %}
+                    {% if ev_change %}{% set R.m = 1 %}{% endif %}
+                    {% set E.l = E.l + [{'kind': 'stop',
+                         'data': {'run_min': ((R.d - R.s) / 60) | round(1), 'drop_a': fa | round(0),
+                                  'drop_b': fb | round(0), 'need_w': thr | round(0), 'step_w': R.l,
+                                  'stop_min_w': STOP_MIN_W, 'stop_frac': STOP_FRAC, 'bal_max': BAL}}] %}
+                  {% endif %}
+                {% else %}
+                  {% set R.lo = 0 %}
+                {% endif %}
+              {% endif %}
+            {# ---------------- stopped: classify 150 s after the drop ------------ #}
+            {% elif R.p == 'x' and now_ts - R.d >= 150 %}
+              {% set R.p = 'i' %}
+              {% if call %}
+                {% if heat %}
+                  {% set E.l = E.l + [{'kind': 'changeover', 'data': {}}] %}
+                {% elif R.m == 1 %}
+                  {# EV-masked: logged, never escalated, no restart deadline #}
+                  {% set E.l = E.l + [{'kind': 'mid_call_stop', 'data': {'in_last_hour': 0,
+                       'today_count': R.dc, 'run_min': ((R.d - R.s) / 60) | round(1), 'masked': true}}] %}
+                {% else %}
+                  {% set R.mc = ((R.mc | select('>', now_ts - 3600) | list) + [R.d])[-2:] %}
+                  {% set R.dc = R.dc + 1 %}
+                  {% set R.rs = R.d + 360 %}
+                  {# Usually the 6203's 40 °F supply-air cutoff doing its job, not a
+                     failure: never 🚨, held tier from the 2nd of the day. #}
+                  {% set E.l = E.l + [{'kind': 'mid_call_stop',
+                       'held': quiet and R.dc >= 2,
+                       'data': {'in_last_hour': R.mc | count, 'today_count': R.dc,
+                                'run_min': ((R.d - R.s) / 60) | round(1), 'masked': false}}] %}
+                {% endif %}
+              {% else %}
+                {% set P = namespace(a=[], b=[]) %}{% set Q = namespace(a=[], b=[]) %}
+                {% for x in buf %}
+                  {% if R.d + 5 <= x[0] <= R.d + 40 %}{% set P.a = P.a + [x[1]] %}{% set P.b = P.b + [x[2]] %}{% endif %}
+                  {% if R.d + 65 <= x[0] <= R.d + 110 %}{% set Q.a = Q.a + [x[1]] %}{% set Q.b = Q.b + [x[2]] %}{% endif %}
+                {% endfor %}
+                {% if P.b | count >= 2 and Q.b | count >= 2 %}
+                  {% set pb = (P.b | sort)[(P.b | count) // 2] %}{% set qb = (Q.b | sort)[(Q.b | count) // 2] %}
+                  {% set pa = (P.a | sort)[(P.a | count) // 2] %}{% set qa = (Q.a | sort)[(Q.a | count) // 2] %}
+                  {% set why = 'fan on' if fan_on else ('heat call' if heat else ('EV change' if R.m == 1
+                       else ('leg A moved' if (pa - qa) | abs >= 100 else 'ok'))) %}
+                  {% set ok = why == 'ok' %}
+                  {% if ok %}{% set R.bm = R.bm + 1 if pb - qb < BLOWER_MIN_W else 0 %}{% endif %}
+                  {% set E.l = E.l + [{'kind': 'blower', 'data': {'watts': pb - qb, 'confident': ok,
+                       'why': why, 'streak': R.bm, 'min_w': BLOWER_MIN_W}}] %}
+                  {% if ok and R.bm >= 2 %}
+                    {% set E.l = E.l + [{'kind': 'blower_missing', 'data': {'watts': pb - qb,
+                         'streak': R.bm}}] %}
+                  {% endif %}
+                {% else %}
+                  {% set E.l = E.l + [{'kind': 'blower', 'data': {'watts': 0, 'confident': false,
+                       'why': 'too few samples', 'streak': R.bm}}] %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endif %}
+          {{ {'rec': {'p': R.p, 'c': R.c, 'co': R.co, 's': R.s, 'ba': R.ba, 'bb': R.bb, 'l': R.l,
+                      'lo': R.lo, 'd': R.d, 'n': R.n, 'rs': R.rs, 'm': R.m, 'bm': R.bm, 'mc': R.mc,
+                      'k': R.k, 'dd': R.dd, 'dc': R.dc},
+              'events': E.l} }}
+    - if: "{{ out.rec != rec }}"
+      then:
+        - action: input_text.set_value
+          target:
+            entity_id: input_text.hvac_cycle
+          data:
+            value: "{{ out.rec | to_json }}"
+    - repeat:
+        for_each: "{{ out.events }}"
+        sequence:
+          - event: hvac_monitor
+            event_data:
+              kind: "{{ repeat.item.kind }}"
+              held: "{{ repeat.item.get('held', false) }}"
+              data: "{{ repeat.item.data }}"
+
+# ---------------------------------------------------------------------------
+# Heat calls (learning): leg-B response within 6 min of a heat call, measured
+# only when the compressor has been off >= 2 min (so the cooling blower tail
+# can't count). Alerts come later, once >= 10 responses are logged.
+- id: hvac_monitor_heat_calls
+  alias: 'HVAC Monitor: Heat Calls'
+  description: >-
+    Records the furnace's power response to each heat call (learning mode).
+    Source: ha-blueprints/hvac-monitor/.
+  mode: single
+  max_exceeded: silent
+  triggers:
+    - trigger: state
+      entity_id: binary_sensor.hvac_heat_call
+      from: 'off'
+      to: 'on'
+  actions:
+    - variables:
+        t0: "{{ as_timestamp(now()) | int }}"
+        rec: >-
+          {% set r = states('input_text.hvac_cycle') %}
+          {{ (r | from_json) if r.startswith('{') else {} }}
+        gated: "{{ rec.get('p', 'i') == 'i' and t0 - rec.get('d', 0) >= 120 }}"
+        base_b: >-
+          {% set buf = state_attr('sensor.hvac_leg_buffer', 's') or [] %}
+          {{ buf | selectattr('0', '>=', t0 - 180) | map(attribute='2') | list | min
+             if buf | selectattr('0', '>=', t0 - 180) | list | count > 0 else none }}
+    - delay:
+        minutes: 6
+    - variables:
+        peak_b: >-
+          {% set buf = state_attr('sensor.hvac_leg_buffer', 's') or [] %}
+          {% set w = buf | selectattr('0', '>=', t0) | map(attribute='2') | list %}
+          {{ w | max if w | count > 0 else none }}
+    - if: "{{ base_b is not none and peak_b is not none }}"
+      then:
+        - event: hvac_monitor
+          event_data:
+            kind: heat_response
+            held: false
+            data:
+              watts: "{{ peak_b - base_b }}"
+              gated: "{{ gated and is_state('binary_sensor.hvac_heat_call', 'on') }}"
+        - variables:
+            hist: "{{ state_attr('sensor.hvac_monitor_log', 'heat_responses') or [] }}"
+        - if: >-
+            {{ gated and hist | count >= 10 and
+               (peak_b - base_b) < 0.4 * (hist | sort)[(hist | count) // 2] }}
+          then:
+            - event: hvac_monitor
+              event_data:
+                kind: heat_no_response
+                held: >-
+                  {{ (now().hour >= 22 or now().hour < 7)
+                     and states('sensor.indoor_temperature') | float(70) >= 60 }}
+                data:
+                  watts: "{{ peak_b - base_b }}"
+
+# ---------------------------------------------------------------------------
+# Alerts. 🚨 (critical, any hour): blower missing twice in a row. Held tier
+# (no-start, no-restart, 2nd+ mid-call stop of the day, heat without
+# response): sent at once 07:00-22:00, else
+# queued in the log's `held` list and sent at 07:00 - or immediately if the
+# house passes 80 °F (cooling) / drops under 60 °F.
+- id: hvac_monitor_alerts
+  alias: 'HVAC Monitor: Alerts'
+  description: >-
+    Pushes HVAC health incidents by urgency tier. Source: ha-blueprints/hvac-monitor/.
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: event
+      event_type: hvac_monitor
+      id: incident
+    - trigger: time
+      at: '07:00:00'
+      id: release
+    - trigger: numeric_state
+      entity_id: sensor.indoor_temperature
+      above: 80
+      id: release
+    - trigger: numeric_state
+      entity_id: sensor.indoor_temperature
+      below: 60
+      id: release
+  actions:
+    - variables:
+        labels:
+          no_start: "Cooling was called but the compressor never started"
+          no_restart: "Compressor didn't restart after stopping mid-call"
+          mid_call_stop: "Compressor stopped mid-call again today - most likely the zone panel's 40 °F supply-air cutoff; frequent cutoffs point at low airflow (filter, dampers) or low charge"
+          heat_no_response: "Heat was called but the furnace barely drew power (ignition problem?)"
+          blower_missing: "Compressor ran but the blower didn't - the coil can freeze"
+    - choose:
+        # ---------------- 🚨 ------------------------------------------------
+        # Mid-call stops are NOT here: on a zoned system they are usually the
+        # panel's supply-air cutoff (HVAC-tech review 2026-09-27). With the 24 V
+        # Y tap, "Y on + no compressor power" becomes the real failure signal.
+        - conditions: >-
+            {{ trigger.id == 'incident' and trigger.event.data.kind == 'blower_missing' }}
+          sequence:
+            - action: notify.mobile_app_iphone_13_pro
+              data:
+                title: 🚨 AC needs attention now
+                message: >-
+                  {{ labels[trigger.event.data.kind] }}.
+                  Consider switching cooling off until it's checked.
+                data:
+                  tag: "hvac_{{ trigger.event.data.kind }}"
+                  group: hvac
+                  push:
+                    sound:
+                      name: default
+                      critical: 1
+                      volume: 1.0
+              continue_on_error: true
+            - action: persistent_notification.create
+              data:
+                notification_id: "hvac_{{ trigger.event.data.kind }}"
+                title: AC needs attention
+                message: "{{ labels[trigger.event.data.kind] }} ({{ now().strftime('%-I:%M %p') }})."
+        # ---------------- held tier, daytime: send now ---------------------
+        - conditions: >-
+            {{ trigger.id == 'incident' and trigger.event.data.kind in labels
+               and not trigger.event.data.held
+               and not trigger.event.data.data.get('masked', false)
+               and (trigger.event.data.kind != 'mid_call_stop'
+                    or trigger.event.data.data.get('today_count', 0) >= 2) }}
+          sequence:
+            - action: notify.mobile_app_iphone_13_pro
+              data:
+                title: 🛠️ HVAC check
+                message: "{{ labels[trigger.event.data.kind] }} ({{ now().strftime('%-I:%M %p') }})."
+                data:
+                  tag: "hvac_{{ trigger.event.data.kind }}"
+                  group: hvac
+              continue_on_error: true
+        # ---------------- release the held queue ----------------------------
+        - conditions: >-
+            {{ trigger.id == 'release'
+               and (state_attr('sensor.hvac_monitor_log', 'held') or []) | count > 0 }}
+          sequence:
+            - variables:
+                held: "{{ state_attr('sensor.hvac_monitor_log', 'held') }}"
+            - action: notify.mobile_app_iphone_13_pro
+              data:
+                title: 🛠️ HVAC overnight
+                message: >-
+                  {% for h in held if not h[2].get('masked', false) %}
+                  {{ h[0] | timestamp_custom('%-I:%M %p') }} - {{ labels.get(h[1], h[1]) }}
+                  {% endfor %}
+                data:
+                  tag: hvac_held
+                  group: hvac
+              continue_on_error: true
+            - event: hvac_monitor
+              event_data:
+                kind: held_sent
+                held: false
+                data: {}
+
+# ---------------------------------------------------------------------------
+# Filters Changed button -> date (ecobee's own filter log isn't exposed).
+- id: hvac_monitor_filters_changed
+  alias: 'HVAC Monitor: Filters Changed'
+  description: "Stamps the filter-change date. Source: ha-blueprints/hvac-monitor/."
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: input_button.hvac_filters_changed
+  actions:
+    - action: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.hvac_filters_changed
+      data:
+        timestamp: "{{ as_timestamp(now()) | int }}"
+    - event: hvac_monitor
+      event_data:
+        kind: filters_changed
+        held: false
+        data: {}
+
+# Fresh-air intake filter (12x12x1 on the 8" attic ventilator) button -> date.
+- id: fresh_air_intake_filter_changed
+  alias: 'HVAC Monitor: Fresh Air Intake Filter Changed'
+  description: "Stamps the intake filter-change date. Source: ha-blueprints/hvac-monitor/."
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: input_button.fresh_air_intake_filter_changed
+  actions:
+    - action: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.fresh_air_intake_filter_changed
+      data:
+        timestamp: "{{ as_timestamp(now()) | int }}"
+    - event: hvac_monitor
+      event_data:
+        kind: intake_filter_changed
+        held: false
+        data: {}
+
+# ---------------------------------------------------------------------------
+# Daily digest, 08:00 - only when something needs attention. Push + a
+# persistent notification (dismissed on a clean morning).
+- id: house_health_daily_digest
+  alias: 'House Health: Daily Digest'
+  description: >-
+    Morning summary of quiet sensors, yesterday's HVAC incidents and filter
+    ages (HVAC + fresh-air intake usage clock). Silent when all is well. Source: ha-blueprints/hvac-monitor/.
+  mode: single
+  triggers:
+    - trigger: time
+      at: '08:00:00'
+  actions:
+    - variables:
+        lines: >-
+          {% set ns = namespace(l=[]) %}
+          {% set devs = state_attr('sensor.stale_sensors', 'devices') or {} %}
+          {% if devs | count > 0 %}
+            {% set parts = namespace(l=[]) %}
+            {% for name, d in devs.items() | sort(attribute='1.age_h', reverse=true) %}
+              {% set parts.l = parts.l + [name ~ ' (' ~ (d.count ~ ' sensors, ' if d.count > 1 else '')
+                   ~ (d.age_h | round(0) | int) ~ ' h)'] %}
+            {% endfor %}
+            {% set ns.l = ns.l + ['🔇 Quiet: ' ~ parts.l[:8] | join(', ')
+                 ~ (' +' ~ (parts.l | count - 8) ~ ' more' if parts.l | count > 8 else '')] %}
+          {% endif %}
+          {% set y = state_attr('sensor.hvac_monitor_log', 'yesterday') or {} %}
+          {% set names = {'no_start': 'no-starts', 'no_restart': 'no-restarts',
+                          'mid_call_stop': 'mid-call stops', 'blower_missing': 'blower missing',
+                          'uncertain_stop': 'uncertain stops', 'heat_no_response': 'heat without response'} %}
+          {# Only counts that need attention: a single mid-call stop is usually the
+             zone panel's supply-air cutoff, and "uncertain" is the detector's own
+             blind spot (e.g. the 8 am leg-A burst load), so they need repeats. #}
+          {% set minimum = {'mid_call_stop': 2, 'uncertain_stop': 3} %}
+          {% set inc = namespace(l=[]) %}
+          {% for k, label in names.items() if y.get(k, 0) >= minimum.get(k, 1) %}
+            {% set inc.l = inc.l + [y[k] ~ ' ' ~ label] %}
+          {% endfor %}
+          {% if inc.l | count > 0 %}
+            {% set ns.l = ns.l + ['❄️ AC yesterday: ' ~ inc.l | join(', ')] %}
+          {% endif %}
+          {% set runs = y.get('runs', []) | sort %}
+          {% if y.get('start', 0) > 60 %}
+            {% set ns.l = ns.l + ['🔁 ' ~ y.start ~ ' compressor starts yesterday'
+                 ~ (', median run ' ~ runs[(runs | count) // 2] ~ ' min' if runs | count > 0 else '')] %}
+          {% endif %}
+          {% set changed = state_attr('input_datetime.hvac_filters_changed', 'timestamp') %}
+          {% set life = states('input_number.hvac_filter_life_days') | float(90) %}
+          {% if changed and changed > 946684800 %}
+            {% set age_d = ((as_timestamp(now()) - changed) / 86400) | int %}
+            {% if age_d > life %}
+              {% set ns.l = ns.l + ['🧽 HVAC filters are ' ~ age_d ~ ' days old'] %}
+            {% endif %}
+          {% endif %}
+          {% set used = states('sensor.fresh_air_intake_filter_life_used') | float(0) %}
+          {% if used >= 100 %}
+            {% set ns.l = ns.l + ['🧽 Fresh-air intake filter due: ' ~ used | int ~ '% used ('
+                 ~ state_attr('sensor.fresh_air_intake_filter_life_used', 'limit') ~ ' limit, '
+                 ~ state_attr('sensor.fresh_air_intake_filter_life_used', 'age_days') ~ ' days old)'] %}
+          {% endif %}
+          {{ ns.l }}
+    - if: "{{ lines | count > 0 }}"
+      then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: 🏠 House check
+            message: "{{ lines | join('\n') }}"
+            data:
+              tag: house_health_digest
+              group: house-health
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: house_health_digest
+            title: House check
+            message: "{{ lines | join('\n\n') }}"
+      else:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: house_health_digest
