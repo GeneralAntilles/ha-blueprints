@@ -5,12 +5,22 @@ blueprint:
     Combined bathroom automation: humidity-driven exhaust fan with post-shower
     purge and min/max runtimes, motion lights with shower hold, and an optional
     temperature+occupancy heater with a restart-surviving safety cutoff.
+    Lights can turn on through a scene (e.g. a Natural Light scene), and
+    night mode can follow a time-of-day sensor you already maintain instead
+    of fixed clock times.
 
 
     Requires HA 2024.10+ (modern trigger/action schema). Every device class is
     optional — leave inputs empty to disable a subsystem. Each configured
     subsystem needs its tracking helper (input_boolean, created manually, with
     NO "Initial" value so state restores across restarts).
+
+
+    Shower buttons (optional): event entities such as a Z-Wave Central Scene
+    double-tap on the fan paddle can declare "shower starting" (hold + fan
+    start/adoption before steam reaches the sensor) or "shower over" (hold
+    released, fan off). Needs bathroom humidity sensors so the hold can be
+    released.
 
 
     Manual respect: anything turned on manually is never turned off by this
@@ -74,6 +84,18 @@ blueprint:
               min: 0
               max: 3600
               unit_of_measurement: seconds
+        scene_entity:
+          name: Turn-On Scene (Optional)
+          description: >-
+            Scene activated instead of a plain turn-on (e.g. a Natural
+            Light scene). The scene must turn on the selected Lights -
+            tracking and turn-off still target those entities. Night
+            brightness, when set, overrides the scene at night.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: scene
     humidity_fan:
       name: Humidity & Fan
       icon: mdi:fan
@@ -144,6 +166,50 @@ blueprint:
             entity:
               filter:
                 - domain: input_boolean
+        shower_start_events:
+          name: Shower Start Button Events (optional)
+          description: >-
+            Event entities that mean "a shower is starting" (e.g. the fan
+            paddle's Z-Wave "Scene 001" event entity for double-tap up).
+            Sets the shower hold and starts the fan - or adopts a fan that
+            is already on manually - so purge and min/max runtime apply
+            before steam reaches the sensor. Needs the Shower Tracking
+            Helper and Bathroom Humidity Sensors (the hold is released by
+            humidity settling).
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: event
+        shower_start_event_types:
+          name: Shower Start Event Types
+          description: >-
+            Comma-separated event_type values that count as a start (empty
+            = every event). Z-Wave Central Scene double-tap is KeyPressed2x.
+          default: KeyPressed2x
+          selector:
+            text:
+        shower_cancel_events:
+          name: Shower Cancel Button Events (optional)
+          description: >-
+            Event entities that mean "shower over / never mind" (e.g. the
+            "Scene 002" event entity for double-tap down). Releases the
+            shower hold and turns the fan off, whoever started it.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: event
+        shower_cancel_event_types:
+          name: Shower Cancel Event Types
+          description: >-
+            Comma-separated event_type values that count as a cancel (empty
+            = every event).
+          default: KeyPressed2x
+          selector:
+            text:
         fan_min_runtime:
           name: Fan Minimum Runtime
           description: Auto-started fans run at least this long
@@ -354,16 +420,41 @@ blueprint:
       icon: mdi:weather-night
       collapsed: true
       input:
+        time_of_day_entity:
+          name: Time-of-Day Sensor (Optional)
+          description: >-
+            Sensor or input_select whose state names the current time slot
+            (e.g. sensor.scene_by_time_of_day). Pick ONE. When set, night
+            mode follows its Night States and the clock window below is
+            ignored.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - sensor
+                    - input_select
+        night_states:
+          name: Night States
+          description: >-
+            Comma-separated states of the time-of-day sensor that count as
+            night (e.g., night,late-night)
+          default: "night,late-night"
+          selector:
+            text:
         night_start:
           name: Night Starts
           description: >-
-            Start of the night window (equal start and end disables night
+            Start of the clock-based night window, used only when no
+            Time-of-Day Sensor is set (equal start and end disables night
             mode)
           default: "22:00:00"
           selector:
             time:
         night_end:
           name: Night Ends
+          description: End of the clock-based night window
           default: "06:30:00"
           selector:
             time:
@@ -445,6 +536,8 @@ trigger_variables:
   tv_light_timeout_night: !input light_timeout_night
   tv_night_start: !input night_start
   tv_night_end: !input night_end
+  tv_tod_entities: !input time_of_day_entity
+  tv_night_states: !input night_states
 
 triggers:
   # ------------------------------------------------------------------
@@ -455,9 +548,20 @@ triggers:
     from: "off"
     to: "on"
     id: motion_on
+  # Recovery: a sensor flapping on->unavailable->on would never re-arm the
+  # from:"off" trigger above, leaving the room dark for the whole occupancy
+  - trigger: state
+    entity_id: !input motion_sensors
+    from:
+      - unavailable
+      - unknown
+    to: "on"
+    id: motion_on
   # Single motion-clear trigger; the day/night timeout is chosen by template
   # at the moment motion clears (a dual-trigger design misses at the
   # day/night boundary; residual boundary cases heal via the watchdog).
+  # Night = the time-of-day sensor's state when one is set, else the clock
+  # window.
   - trigger: state
     entity_id: !input motion_sensors
     from: "on"
@@ -465,7 +569,15 @@ triggers:
     for:
       seconds: >-
         {% set nowt = now().strftime('%H:%M:%S') %}
-        {% if tv_night_start == tv_night_end %}
+        {% set tods = [tv_tod_entities] if tv_tod_entities is string
+           else tv_tod_entities %}
+        {% set tods = tods | reject('eq', '') | list %}
+        {% if tods | length > 0 %}
+          {{ tv_light_timeout_night
+             if states(tods[0]) in
+                (tv_night_states.split(',') | map('trim') | list)
+             else tv_light_timeout }}
+        {% elif tv_night_start == tv_night_end %}
           {{ tv_light_timeout }}
         {% elif tv_night_start < tv_night_end %}
           {{ tv_light_timeout_night
@@ -484,6 +596,19 @@ triggers:
     for:
       minutes: !input occupancy_grace
     id: occupancy_gone
+  # ------------------------------------------------------------------
+  # Shower buttons. Event entities restamp their state (a timestamp) on
+  # every event, so a plain state trigger sees each press; the branch
+  # accepts only a FRESH timestamp (restores and availability flaps
+  # replay the old one) with a matching event_type. An empty entity list
+  # is an inert trigger.
+  # ------------------------------------------------------------------
+  - trigger: state
+    entity_id: !input shower_start_events
+    id: shower_start
+  - trigger: state
+    entity_id: !input shower_cancel_events
+    id: shower_cancel
   # ------------------------------------------------------------------
   # Humidity high (three modes, ONE shared id) - guarded template triggers
   # so unset optional sensors leave them inert
@@ -613,9 +738,21 @@ triggers:
   # ------------------------------------------------------------------
   # Scheduled + reconciliation
   # ------------------------------------------------------------------
+  # Clock-mode night end; disabled when a time-of-day sensor is configured
+  # so a sensor outage at this clock time can't stand in for a night end
   - trigger: time
     at: !input night_end
+    enabled: >-
+      {{ ([tv_tod_entities] if tv_tod_entities is string else tv_tod_entities)
+         | reject('eq', '') | list | length == 0 }}
     id: night_end_catchup
+  # Time-of-day mode: a slot change is only a candidate; the branch requires
+  # a real night -> valid day transition (to: null ignores attribute-only
+  # changes). An empty list is an inert trigger.
+  - trigger: state
+    entity_id: !input time_of_day_entity
+    to: null
+    id: tod_night_end
   - trigger: homeassistant
     event: start
     id: reconcile
@@ -630,6 +767,9 @@ variables:
   light_timeout: !input light_timeout
   light_timeout_night: !input light_timeout_night
   night_brightness_pct: !input night_brightness_pct
+  scene_entity: !input scene_entity
+  time_of_day_entities: !input time_of_day_entity
+  night_states: !input night_states
   humidity_sensors: !input humidity_sensors
   humidity_off_threshold: !input humidity_off_threshold
   reference_humidity_sensor: !input reference_humidity_sensor
@@ -639,6 +779,8 @@ variables:
   fan_entities: !input fan_entities
   fan_auto_flag: !input fan_auto_flag
   shower_active_flag: !input shower_active_flag
+  shower_start_event_types: !input shower_start_event_types
+  shower_cancel_event_types: !input shower_cancel_event_types
   fan_min_runtime: !input fan_min_runtime
   fan_max_runtime: !input fan_max_runtime
   heater_entities: !input heater_entities
@@ -665,9 +807,20 @@ variables:
   house_mode_ok: >-
     {{ house_mode_entity == '' or excluded_house_modes == ''
        or states(house_mode_entity) not in excluded_modes_list }}
+  # Time-of-day sensor (first of the list, tolerating a plain string) wins
+  # over the clock window
+  tod_entity: >-
+    {% set tods = [time_of_day_entities] if time_of_day_entities is string
+       else time_of_day_entities %}
+    {% set tods = tods | reject('eq', '') | list %}
+    {{ tods[0] if tods | length > 0 else '' }}
+  night_states_list: >-
+    {{ night_states.split(',') | map('trim') | list }}
   is_night: >-
     {% set nowt = now().strftime('%H:%M:%S') %}
-    {% if night_start == night_end %} false
+    {% if tod_entity != '' %}
+      {{ states(tod_entity) in night_states_list }}
+    {% elif night_start == night_end %} false
     {% elif night_start < night_end %}
       {{ night_start <= nowt and nowt < night_end }}
     {% else %}
@@ -738,6 +891,53 @@ variables:
   shower_hold: >-
     {{ shower_active_flag != ''
        and states(shower_active_flag) == 'on' }}
+  shower_start_types_list: >-
+    {{ shower_start_event_types.split(',') | map('trim')
+       | reject('eq', '') | list }}
+  shower_cancel_types_list: >-
+    {{ shower_cancel_event_types.split(',') | map('trim')
+       | reject('eq', '') | list }}
+  # A real button press = the event entity's state changed to a timestamp
+  # that is only seconds old. A restart restore, a Z-Wave reload or an
+  # unavailable flap re-emits the LAST event's timestamp (and its
+  # event_type), which would otherwise replay a start or cancel.
+  # Evaluated for every run; only the shower logic reads it.
+  shower_event_is_press: >-
+    {% if trigger.to_state is defined and trigger.to_state is not none
+          and trigger.to_state.state not in ['unknown', 'unavailable']
+          and (trigger.from_state is none
+               or trigger.to_state.state != trigger.from_state.state) %}
+      {% set ts = as_timestamp(trigger.to_state.state, none) %}
+      {{ ts is not none and (as_timestamp(now()) - ts) | abs < 15 }}
+    {% else %} false {% endif %}
+  shower_event_type: >-
+    {{ trigger.to_state.attributes.event_type | default('')
+       if trigger.to_state is defined and trigger.to_state is not none
+       else '' }}
+  # Single predicate for "this run is a valid shower start", shared by the
+  # start branch and the heater-on step so a filtered-out event (wrong
+  # type, stale restore, missing helper/sensors, excluded mode) can never
+  # reach the heater through the trigger id alone
+  shower_start_valid: >-
+    {{ trigger.id | default('') == 'shower_start'
+       and shower_event_is_press
+       and (shower_start_types_list | length == 0
+            or shower_event_type in shower_start_types_list)
+       and shower_active_flag != ''
+       and humidity_sensors | length > 0
+       and house_mode_ok }}
+  # Age of the current hold. A declared shower is set BEFORE steam reaches
+  # the sensor, so "humidity is settled" means nothing until the hold has
+  # had a minimum runtime's worth of time to become humid.
+  shower_hold_seconds: >-
+    {% set s = expand([shower_active_flag]) | list
+       if shower_active_flag != '' else [] %}
+    {% if shower_hold and s | length > 0 %}
+      {{ (as_timestamp(now()) - as_timestamp(s[0].last_changed)) | int }}
+    {% else %} 0 {% endif %}
+  shower_hold_matured: >-
+    {{ not shower_hold
+       or shower_hold_seconds >= fan_min_runtime | int * 60 }}
   bath_humidity_valid: >-
     {{ humidity_sensors | map('states') | select('is_number')
        | list | length > 0 }}
@@ -814,10 +1014,14 @@ actions:
               - action: input_boolean.turn_off
                 target:
                   entity_id: "{{ heater_auto_flag }}"
-          # (2) stale shower hold: humidity has settled
+          # (2) stale shower hold: humidity has settled - but a hold
+          # declared by a shower-start button is set before any steam, so
+          # it only counts as stale once it has matured (min runtime)
           - if:
               - condition: template
-                value_template: "{{ shower_hold and humidity_settled_now }}"
+                value_template: >-
+                  {{ shower_hold and humidity_settled_now
+                     and shower_hold_matured }}
             then:
               - action: input_boolean.turn_off
                 target:
@@ -861,13 +1065,15 @@ actions:
                 continue_on_error: true
                 target:
                   entity_id: !input light_entities
-          # (5a) missed fan-off: settled past min runtime
+          # (5a) missed fan-off: settled past min runtime (and past the
+          # hold's own min runtime, for a fan adopted by a shower start)
           - if:
               - condition: template
                 value_template: >-
                   {{ fan_configured and states(fan_auto_flag) == 'on'
                      and any_fan_on and humidity_settled_now
-                     and fan_on_seconds >= fan_min_runtime | int * 60 }}
+                     and fan_on_seconds >= fan_min_runtime | int * 60
+                     and shower_hold_matured }}
             then:
               - action: homeassistant.turn_off
                 continue_on_error: true
@@ -1133,6 +1339,94 @@ actions:
                 continue_on_error: true
                 target:
                   entity_id: !input fan_entities
+      # Shower START button: the person declared the shower, so act
+      # before steam reaches the sensor. Same shape as humidity_high, plus
+      # adoption of a fan that is already on manually (the controller then
+      # owns the purge / min / max runtime instead of the manual timeout).
+      # Gated on humidity sensors: they are the only thing that can
+      # release a hold that never sees a humidity spike.
+      - conditions:
+          - condition: trigger
+            id: shower_start
+          - condition: template
+            value_template: "{{ shower_start_valid }}"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ shower_active_flag }}"
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_configured and all_fans_off
+                     and not (is_night and suppress_fan_at_night) }}
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+              - action: homeassistant.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+            else:
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ fan_configured and any_fan_on
+                         and states(fan_auto_flag) == 'off' }}
+                then:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ fan_auto_flag }}"
+      # Shower CANCEL button: release the hold and stop the fan whoever
+      # started it (the person is standing at the paddle). Flag first so a
+      # fan that is already off does not leave a stale ownership flag;
+      # the fan_off hygiene branch is then a no-op.
+      - conditions:
+          - condition: trigger
+            id: shower_cancel
+          - condition: template
+            value_template: >-
+              {{ shower_event_is_press
+                 and (shower_cancel_types_list | length == 0
+                      or shower_event_type in shower_cancel_types_list) }}
+        sequence:
+          - if:
+              - condition: template
+                value_template: "{{ shower_active_flag != '' }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+          - if:
+              - condition: template
+                value_template: "{{ fan_auto_flag != '' }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+          - if:
+              - condition: template
+                value_template: "{{ fan_entities | length > 0 and any_fan_on }}"
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+          # The shower may have been the heater's only occupancy source
+          # (occupancy_gone is a no-op under a hold). Lights are left to
+          # motion - the person is standing at the paddle.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ heater_configured and states(heater_auto_flag) == 'on'
+                     and any_heater_on and not is_motion_active
+                     and motion_idle_seconds >= occupancy_grace | int * 60
+                  }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input heater_entities
       # Shower over: purge complete. Whichever of settle/min-runtime
       # finishes LAST performs the fan-off (fan_min_elapsed is the retry
       # partner; the watchdog is the cleanup layer).
@@ -1184,18 +1478,61 @@ actions:
                 continue_on_error: true
                 target:
                   entity_id: !input heater_entities
+      # The min-runtime clock runs from the FAN's on-time. A fan adopted
+      # by a shower-start button may already be near its min runtime, so
+      # the hold must also have matured before ambient humidity counts as
+      # "settled" - otherwise a just-declared shower is cut off.
       - conditions:
           - condition: trigger
             id: fan_min_elapsed
           - condition: template
             value_template: >-
               {{ fan_configured and states(fan_auto_flag) == 'on'
-                 and any_fan_on and humidity_settled_now }}
+                 and any_fan_on and humidity_settled_now
+                 and shower_hold_matured }}
         sequence:
           - action: homeassistant.turn_off
             continue_on_error: true
             target:
               entity_id: !input fan_entities
+          # A button-started shower whose steam never reached the sensor:
+          # humidity was settled the whole time, so humidity_settled has
+          # no false->true edge to fire on. The fan is off now - release
+          # the hold and run the deferred light/heater-off here instead of
+          # waiting for the reconcile tick. Trade-off: in a humidity-driven
+          # run that settles just before min runtime this releases the
+          # hold before the purge window ends; steam is gone by then, and
+          # the light-off still requires motion idle >= timeout.
+          - if:
+              - condition: template
+                value_template: "{{ shower_hold }}"
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ shower_active_flag }}"
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ lights_configured and states(light_auto_flag) == 'on'
+                         and any_light_on and not is_motion_active
+                         and motion_idle_seconds >= applicable_light_timeout }}
+                then:
+                  - action: homeassistant.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: !input light_entities
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ heater_configured and states(heater_auto_flag) == 'on'
+                         and any_heater_on and not is_motion_active
+                         and motion_idle_seconds >= occupancy_grace | int * 60
+                      }}
+                then:
+                  - action: homeassistant.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: !input heater_entities
       - conditions:
           - condition: trigger
             id: fan_max_elapsed
@@ -1287,10 +1624,28 @@ actions:
                     target:
                       entity_id: "{{ non_light_entities }}"
             else:
-              - action: homeassistant.turn_on
-                continue_on_error: true
-                target:
-                  entity_id: !input light_entities
+              - if:
+                  - condition: template
+                    value_template: "{{ scene_entity != '' }}"
+                then:
+                  - action: scene.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ scene_entity }}"
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ non_light_entities | length > 0 }}
+                    then:
+                      - action: homeassistant.turn_on
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ non_light_entities }}"
+                else:
+                  - action: homeassistant.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: !input light_entities
       # Timeout chosen at clear time by the trigger; the elapsed>=applicable
       # re-check makes the day/night boundary safe (watchdog heals the
       # remaining corner)
@@ -1345,11 +1700,21 @@ actions:
       # ==============================================================
       - conditions:
           - condition: trigger
-            id: night_end_catchup
+            id:
+              - night_end_catchup
+              - tod_night_end
           - condition: template
             value_template: >-
-              {{ suppress_fan_at_night and fan_configured and shower_hold
-                 and all_fans_off and house_mode_ok }}
+              {{ suppress_fan_at_night and not is_night
+                 and fan_configured and shower_hold
+                 and all_fans_off and house_mode_ok
+                 and (trigger.id != 'tod_night_end'
+                      or (trigger.from_state is not none
+                          and trigger.to_state is not none
+                          and trigger.from_state.state in night_states_list
+                          and trigger.to_state.state not in
+                              night_states_list + ['unknown', 'unavailable']))
+              }}
         sequence:
           - action: input_boolean.turn_on
             target:
@@ -1368,8 +1733,9 @@ actions:
   - if:
       - condition: template
         value_template: >-
-          {{ trigger.id | default('')
-               in ['temp_low', 'motion_on', 'humidity_high']
+          {{ (trigger.id | default('')
+                in ['temp_low', 'motion_on', 'humidity_high']
+              or shower_start_valid)
              and heater_configured and all_heaters_off
              and house_mode_ok and current_temp_low
              and not heater_lockout
@@ -1377,6 +1743,7 @@ actions:
                   or motion_idle_seconds < occupancy_grace | int * 60
                   or (shower_counts_as_occupied
                       and (trigger.id == 'humidity_high'
+                           or shower_start_valid
                            or (shower_active_flag != ''
                                and states(shower_active_flag) == 'on'))))
           }}

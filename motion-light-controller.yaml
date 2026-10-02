@@ -342,16 +342,6 @@ actions:
           - condition: template
             value_template: >-
               {{ house_mode_ok and lights_configured and all_lights_off }}
-          # Manual respect: if any light changed AFTER the motion
-          # transition (a manual action racing this trigger), do not
-          # relight
-          - condition: template
-            value_template: >-
-              {% set le = expand(light_entities) | list %}
-              {{ le | length == 0
-                 or (le | map(attribute='last_changed')
-                     | map('as_timestamp') | max)
-                    <= as_timestamp(trigger.to_state.last_changed) }}
         sequence:
           - action: input_boolean.turn_on
             target:

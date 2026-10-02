@@ -29,6 +29,24 @@ blueprint:
     Hold and release are left alone so the device keeps dimming locally.
 
 
+    Linked Overheads lets two dimmers in one room act as one circuit:
+    every gesture above drives the linked loads along with this switch's
+    own load.
+
+
+    Extra Buttons ties other room buttons into the overheads: event
+    entities (a Hue Tap or Hue Dimmer button, say) or input_button helpers
+    (a virtual button any script can press) whose press brings the
+    overheads to the time-of-day brightness or turns them off. Only the
+    overheads are touched - the Hue bridge or another automation already
+    owns what that button does to the bulbs. A Room On button can also be
+    scene-aware, best-effort: the overheads come on at the band level at
+    once, then a probe action asks the Hue bridge which scene the press
+    landed on and mood scenes (Relax, Nightlight...) turn them back off.
+    HA's own scene entities cannot tell - they only record activations
+    made through HA, not by the bridge.
+
+
     Requires HA 2024.10+ and a dimmer that reports Central Scene. On Zooz
     ZEN2x/ZEN3x/ZEN7x switches "Scene Control" must be Enabled in the device
     configuration, otherwise no multi-tap ever reaches Home Assistant.
@@ -55,6 +73,16 @@ blueprint:
 
 
     Requires HA 2026.1+ for the scene.activated trigger used by zone sync.
+
+
+    GE / Jasco paddle mode (see the section of that name): older Jasco
+    dimmers such as the 14294 / ZW3005 have no Central Scene. Their double
+    tap arrives as a Scene Activation event and a single tap only shows up
+    as the load turning on or off, so in that mode Up 1x / Down 1x are
+    inferred from a hand-made load change (no user and no parent context)
+    and Up 2x / Down 2x from Scene Activation 1 / 2. Triple taps, relay
+    button and prestage do not exist on those switches, and hold-to-zero
+    counts as Down 1x because the load reports off.
   domain: automation
   homeassistant:
     min_version: 2026.1.0
@@ -78,6 +106,22 @@ blueprint:
             cans it physically switches
           selector:
             entity:
+              filter:
+                - domain: light
+        linked_lights:
+          name: Linked Overheads
+          description: >-
+            Other overhead loads that follow every paddle gesture on this
+            switch as if they were on the same circuit - e.g. a second
+            dimmer in the same room. Each of those switches should run its
+            own instance listing this dimmer's load in return, so the
+            room acts as one no matter which paddle is pressed. Zone scene
+            sync deliberately leaves these alone: the other instance
+            brings its own load, so nothing is sent twice.
+          default: []
+          selector:
+            entity:
+              multiple: true
               filter:
                 - domain: light
         hue_scene:
@@ -254,6 +298,101 @@ blueprint:
               multiple: true
               filter:
                 - domain: scene
+    aux:
+      name: Extra Buttons (optional)
+      icon: mdi:remote
+      collapsed: true
+      input:
+        aux_on_events:
+          name: Room On Buttons
+          description: >-
+            Event entities whose press brings the overheads (this load plus
+            Linked Overheads) to the current time-of-day brightness, e.g. a
+            Hue Tap button the Hue app already uses to turn the room on or
+            cycle its scenes. The Hue side is left alone. An input_button
+            helper works too - press it from a wake-up script and the
+            overheads follow the same path.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - event
+                    - input_button
+        aux_off_events:
+          name: Room Off Buttons
+          description: >-
+            Event entities (or input_button helpers) whose press turns the
+            overheads off, e.g. the Hue Tap button that turns the room off
+            in the Hue app.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - event
+                    - input_button
+        aux_event_types:
+          name: Button Event Types
+          description: >-
+            Comma-separated event types that count as a press. Hue buttons
+            report initial_press once per press (a Hue Dimmer also reports
+            short_release, repeat, long_press and long_release, which are
+            ignored by default). Leave empty to accept every event type.
+            input_button helpers have no event types and always count.
+          default: initial_press
+          selector:
+            text:
+        aux_scene_probe:
+          name: Scene Probe Action (scene-aware Room On)
+          description: >-
+            Optional. An action that reports which Hue scene the bridge
+            recalled last, e.g. shell_command.hue_last_scene (see
+            /config/bin/hue_last_scene.py). It is called with data
+            room: <the Natural Light Scene's Hue room name>, so it can
+            limit itself to this room, and its response must carry JSON
+            {"scene": "<name>", "age": <seconds>} in stdout (shell_command)
+            or content (rest_command). The overheads come on at the band
+            level immediately; the probe runs afterwards and only ever
+            turns them back off. Leave empty and a Room On press simply
+            brings the overheads to the band level.
+          default: ""
+          selector:
+            text:
+        aux_off_scene_names:
+          name: Mood Scenes (overheads off)
+          description: >-
+            Comma-separated Hue scene names that turn the overheads back
+            OFF when a Room On button lands on them, e.g. "Relax,
+            Nightlight". Any other scene, or no recent recall at all,
+            leaves them on at the band level.
+          default: ""
+          selector:
+            text:
+        aux_scene_window:
+          name: Scene Probe Window
+          description: >-
+            A recall older than this many seconds is ignored, so a stale
+            mood scene from earlier cannot veto a fresh press.
+          default: 20
+          selector:
+            number:
+              min: 2
+              max: 120
+              unit_of_measurement: s
+        aux_scene_settle:
+          name: Scene Probe Settle
+          description: >-
+            Milliseconds to wait after the press before asking the bridge,
+            so its scene cycle has landed.
+          default: 1000
+          selector:
+            number:
+              min: 0
+              max: 5000
+              unit_of_measurement: ms
     relay:
       name: Relay / Third Button (optional)
       icon: mdi:gesture-tap-button
@@ -323,6 +462,79 @@ blueprint:
               min: 0
               max: 255
               mode: box
+    legacy:
+      name: GE / Jasco Paddle (optional)
+      icon: mdi:toggle-switch-variant
+      collapsed: true
+      input:
+        legacy_paddle:
+          name: GE / Jasco Paddle Mode
+          description: >-
+            Turn on for a dimmer without Central Scene (GE / Jasco 14294,
+            12724 and similar). Double taps are read from the Scene
+            Activation event the switch sends instead, and single taps
+            from the load turning on or off by hand - a change made from
+            the app, voice or another automation carries a user or parent
+            context and is ignored, matching the Central Scene grammar.
+
+
+            Trade-offs on these switches: the load turns on at its last
+            level and is corrected to the band level a moment later (no
+            prestage parameter exists, so leave that at 0), the room
+            responds only after the switch reports (set its manual dimmer
+            rate low), and a single tap within the double-tap window right
+            after a double tap is ignored.
+          default: false
+          selector:
+            boolean:
+        legacy_up_scene:
+          name: Double-Tap Up Scene ID
+          description: >-
+            Scene Activation ID the switch sends for a double tap on the
+            upper paddle (1 on GE / Jasco)
+          default: 1
+          selector:
+            number:
+              min: 1
+              max: 255
+              mode: box
+        legacy_down_scene:
+          name: Double-Tap Down Scene ID
+          description: >-
+            Scene Activation ID for a double tap on the lower paddle
+            (2 on GE / Jasco)
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 255
+              mode: box
+        legacy_settle_ms:
+          name: Load Change Settle Time
+          description: >-
+            A double tap flips the load too, so a load report waits this
+            long for the matching Scene Activation before it is treated as
+            a single tap
+          default: 600
+          selector:
+            number:
+              min: 0
+              max: 5000
+              unit_of_measurement: ms
+              mode: box
+        legacy_double_window:
+          name: Double-Tap Window
+          description: >-
+            A load change this close to the last Scene Activation event
+            belongs to that double tap and is not a single tap. Covers the
+            switch's ramp time, since it reports the load after ramping.
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 30
+              unit_of_measurement: s
+              mode: box
     advanced:
       name: Advanced
       icon: mdi:tune
@@ -356,10 +568,17 @@ blueprint:
 # Queued so a fast down-down or up-then-down never interleaves two
 # sequences against the same light. This serializes THIS instance only -
 # it does not order us against other automations or scripts touching the
-# same load, so nothing here may assume exclusive ownership
+# same load, so nothing here may assume exclusive ownership.
+#
+# Queueing is only safe while runs stay short, because a slow run delays
+# every press behind it. A measured example: one run blocked 16.79s
+# inside an awaited script and the next press sat 1.91s before its first
+# action. That is why the branches below fan their Z-Wave and Hue calls
+# out with `parallel` instead of letting the slowest device set the pace.
+# warning, not silent: a dropped press should never be invisible
 mode: queued
 max: 5
-max_exceeded: silent
+max_exceeded: warning
 
 triggers:
   - trigger: event
@@ -368,6 +587,19 @@ triggers:
       command_class_name: Central Scene
       device_id: !input dimmer_device
     id: paddle
+  # GE / Jasco paddle mode only (both gated by enabled:, so Central Scene
+  # instances never spin a run on their own load changes)
+  - trigger: event
+    event_type: zwave_js_value_notification
+    event_data:
+      command_class_name: Scene Activation
+      device_id: !input dimmer_device
+    enabled: !input legacy_paddle
+    id: legacy_double
+  - trigger: state
+    entity_id: !input dimmer_light
+    enabled: !input legacy_paddle
+    id: legacy_single
   # Prestage only. An empty entity list is a trigger that never fires,
   # which is how the time-of-day sensor stays optional
   - trigger: state
@@ -384,9 +616,22 @@ triggers:
     target:
       entity_id: !input sync_scenes
     id: scene_sync
+  # Extra Buttons: an event entity's state is the time of its last event,
+  # so to: null fires once per press and ignores attribute-only churn.
+  # Empty lists are inert triggers
+  - trigger: state
+    entity_id: !input aux_on_events
+    to: null
+    id: aux_on
+  - trigger: state
+    entity_id: !input aux_off_events
+    to: null
+    id: aux_off
 
 variables:
+  dimmer_device: !input dimmer_device
   dimmer_light: !input dimmer_light
+  linked_lights: !input linked_lights
   hue_scene: !input hue_scene
   hue_lights: !input hue_lights
   time_of_day_entity: !input time_of_day_entity
@@ -402,6 +647,50 @@ variables:
   down_paddle_scene: !input down_paddle_scene
   relay_scene: !input relay_scene
   prestage_param: !input prestage_param
+  legacy_paddle: !input legacy_paddle
+  legacy_up_scene: !input legacy_up_scene
+  legacy_down_scene: !input legacy_down_scene
+  legacy_double_window: !input legacy_double_window
+  aux_event_types: !input aux_event_types
+  aux_scene_probe: !input aux_scene_probe
+  aux_off_scene_names: !input aux_off_scene_names
+  aux_scene_window: !input aux_scene_window
+  aux_off_names: >-
+    {% if aux_off_scene_names is string and aux_off_scene_names | trim != '' %}
+      {{ (aux_off_scene_names | lower).split(',') | map('trim')
+         | reject('eq', '') | list }}
+    {% else %} {{ [] }} {% endif %}
+  aux_types_list: >-
+    {% if aux_event_types is string and aux_event_types | trim != '' %}
+      {{ aux_event_types.split(',') | map('trim') | reject('eq', '')
+         | list }}
+    {% else %} {{ [] }} {% endif %}
+  # A real press on an Extra Button: a fresh event timestamp (not an
+  # availability flap) whose event type is one we accept. input_button
+  # helpers carry no event type and always count
+  aux_press: >-
+    {{ trigger is defined
+       and (trigger.id | default('')) in ['aux_on', 'aux_off']
+       and trigger.to_state is not none
+       and trigger.to_state.state not in ['unknown', 'unavailable']
+       and (trigger.from_state is none
+            or trigger.from_state.state != trigger.to_state.state)
+       and (aux_types_list | length == 0
+            or not trigger.entity_id.startswith('event.')
+            or (trigger.to_state.attributes.event_type | default(''))
+               in aux_types_list) }}
+  # The switch's Scene Activation event entity: its state is the time of
+  # the last double tap, which is how a load report is told apart from a
+  # single tap. Found by event type rather than name so renames don't matter
+  legacy_scene_event: >-
+    {% set ns = namespace(e='') %}
+    {% for e in device_entities(dimmer_device)
+       if e.startswith('event.')
+       and 'Scene activation scene id'
+           in (state_attr(e, 'event_types') or []) %}
+      {% set ns.e = e %}
+    {% endfor %}
+    {{ ns.e }}
 
   tod_entity: >-
     {{ (time_of_day_entity | first) if time_of_day_entity | length > 0
@@ -429,6 +718,10 @@ variables:
   own_scenes: >-
     {{ [hue_scene, lamps_only_scene, lamps_scene]
        | reject('eq', '') | list }}
+  # Every load a paddle gesture drives: this switch's own plus any linked
+  # overheads. Zone sync and prestage keep using dimmer_light alone
+  load_lights: >-
+    {{ ([dimmer_light] + (linked_lights | list)) | unique | list }}
   # Hue rooms/zones are light entities, but a lamp on a smart plug is not -
   # only the light domain accepts a brightness
   hue_light_domain: >-
@@ -440,6 +733,20 @@ variables:
   # the load afterwards
   prestage_level: >-
     {{ [[band_pct | int, 1] | max, 99] | min }}
+  # True when the cans are already where a zone sync would put them.
+  # Note a sync scene generally does NOT contain the cans (Hue zones
+  # cannot hold Z-Wave devices), so the sync branch is the only thing
+  # that brings them along and must not be blanket-suppressed - this
+  # only skips the genuinely redundant repeat, e.g. re-recalling a scene
+  # that is already up. Tolerance is 2pct because the switch quantises
+  # to 0-99 and HA to 0-255, so a round-trip can land a point off
+  at_band_already: >-
+    {% set want = band_pct | int %}
+    {% set is_on = is_state(dimmer_light, 'on') %}
+    {% set b = state_attr(dimmer_light, 'brightness') %}
+    {% if want <= 0 %}{{ not is_on }}
+    {% elif not is_on or b is none %}{{ false }}
+    {% else %}{{ (b | int / 2.55 - want) | abs <= 2 }}{% endif %}
 
 actions:
   # Gate on the trigger id, NOT on `trigger.event is defined`: the
@@ -449,13 +756,52 @@ actions:
   - variables:
       is_paddle: >-
         {{ trigger is defined and (trigger.id | default('')) == 'paddle' }}
+      # GE / Jasco double tap: Scene Activation carries the scene in
+      # `value`; the dimming-duration value of the same command is skipped
+      is_legacy_double: >-
+        {{ trigger is defined
+           and (trigger.id | default('')) == 'legacy_double'
+           and legacy_paddle
+           and (trigger.event.data.property | default('')) == 'sceneId' }}
+      # GE / Jasco single tap: an on<->off flip of the load with neither a
+      # user nor a parent context, i.e. not the app, voice or an automation.
+      # Brightness-only changes (hold to dim, our own band correction) and
+      # availability flaps are not taps
+      is_legacy_single: >-
+        {{ trigger is defined
+           and (trigger.id | default('')) == 'legacy_single'
+           and legacy_paddle
+           and trigger.from_state is not none
+           and trigger.to_state is not none
+           and trigger.from_state.state in ['on', 'off']
+           and trigger.to_state.state in ['on', 'off']
+           and trigger.from_state.state != trigger.to_state.state
+           and trigger.to_state.context.user_id is none
+           and trigger.to_state.context.parent_id is none }}
       # Empty scene id matches no paddle branch, so every non-paddle
-      # trigger falls through to its own branch untouched
+      # trigger falls through to its own branch untouched. Legacy gestures
+      # are translated onto the Central Scene ids so the branches below
+      # stay the single source of the grammar
       scene_id: >-
-        {{ trigger.event.data.property_key_name if is_paddle else '' }}
+        {% if is_paddle %}
+          {{ trigger.event.data.property_key_name }}
+        {% elif is_legacy_double %}
+          {% set v = (trigger.event.data.value_raw
+                      if trigger.event.data.value_raw is defined
+                      else trigger.event.data.value) | int(-1) %}
+          {% if v == legacy_up_scene | int %}{{ up_paddle_scene }}
+          {% elif v == legacy_down_scene | int %}{{ down_paddle_scene }}
+          {% endif %}
+        {% elif is_legacy_single %}
+          {{ up_paddle_scene if trigger.to_state.state == 'on'
+             else down_paddle_scene }}
+        {% endif %}
       # value_raw is the documented field; the string form is accepted too
       # so this survives a Z-Wave JS payload change
       key: >-
+        {% if is_legacy_double %}3
+        {% elif is_legacy_single %}0
+        {% else %}
         {% set raw = (trigger.event.data.value_raw
                       if is_paddle
                          and trigger.event.data.value_raw is defined
@@ -464,6 +810,28 @@ actions:
                         'KeyPressed2x': 3, 'KeyPressed3x': 4,
                         'KeyPressed4x': 5, 'KeyPressed5x': 6} %}
         {{ names.get(raw, raw) | int(-1) }}
+        {% endif %}
+
+  # GE / Jasco: a double tap flips the load as well, so a load report is
+  # only a single tap if no Scene Activation event lands around it. Wait
+  # for the event to arrive, then read the scene event entity's state
+  # (the time of the last double tap) at that moment, not at run start
+  - if:
+      - condition: template
+        value_template: "{{ is_legacy_single }}"
+    then:
+      - delay:
+          milliseconds: !input legacy_settle_ms
+      - if:
+          - condition: template
+            value_template: >-
+              {% set t = states(legacy_scene_event)
+                         if legacy_scene_event != '' else 'unknown' %}
+              {{ t not in ['unknown', 'unavailable', '']
+                 and (now() - as_datetime(t)).total_seconds()
+                     < legacy_double_window | float(5) }}
+        then:
+          - stop: Load change belongs to a double tap
 
   - choose:
       # ==============================================================
@@ -499,6 +867,15 @@ actions:
             id: scene_sync
           - condition: template
             value_template: "{{ trigger.entity_id not in own_scenes }}"
+          # Skip the no-op repeat. This instance can reach a sync scene
+          # through its own relay/triple-tap action inputs, and those are
+          # opaque blobs we cannot enumerate into own_scenes, so the
+          # activation returns here as a scene_sync. That re-entry is
+          # wanted the first time - it is what lights the cans - but a
+          # second identical pass would just spend a Z-Wave frame to set
+          # the level it is already at, while holding the queue
+          - condition: template
+            value_template: "{{ not at_band_already }}"
         sequence:
           - if:
               - condition: template
@@ -519,13 +896,18 @@ actions:
                   entity_id: "{{ dimmer_light }}"
 
       # ==============================================================
-      # UP 1x - room on: cans at the band level, Natural Light scene
+      # EXTRA BUTTONS - another room button was pressed. Overheads only:
+      # whatever owns that button already handled the Hue side
       # ==============================================================
       - conditions:
+          - condition: trigger
+            id: aux_on
           - condition: template
-            value_template: >-
-              {{ scene_id == up_paddle_scene and key == 0 }}
+            value_template: "{{ aux_press }}"
         sequence:
+          # Best effort first: the band level is the right answer for
+          # every scene but the mood ones, so go there at once and let
+          # the probe below correct the exception a moment later
           - if:
               - condition: template
                 value_template: "{{ band_pct | int > 0 }}"
@@ -533,24 +915,111 @@ actions:
               - action: light.turn_on
                 continue_on_error: true
                 target:
-                  entity_id: "{{ dimmer_light }}"
+                  entity_id: "{{ load_lights }}"
                 data:
                   brightness_pct: "{{ band_pct | int }}"
             else:
-              # Band is 0: the paddle already switched the load on locally,
-              # so undo it and let the smart bulbs light the room
               - action: light.turn_off
                 continue_on_error: true
                 target:
-                  entity_id: "{{ dimmer_light }}"
+                  entity_id: "{{ load_lights }}"
+          # Scene-aware: ask the bridge what the press landed on. A failed
+          # or empty probe never vetoes - the overheads stay on
           - if:
               - condition: template
-                value_template: "{{ scene_ok and hue_scene != '' }}"
+                value_template: >-
+                  {{ band_pct | int > 0
+                     and aux_scene_probe is string
+                     and aux_scene_probe | trim != ''
+                     and aux_off_names | length > 0 }}
             then:
-              - action: scene.turn_on
+              - delay:
+                  milliseconds: !input aux_scene_settle
+              - action: "{{ aux_scene_probe | trim }}"
                 continue_on_error: true
-                target:
-                  entity_id: "{{ hue_scene }}"
+                response_variable: aux_probe
+                data:
+                  room: >-
+                    {{ state_attr(hue_scene, 'group_name')
+                       if hue_scene != '' else '' }}
+              - variables:
+                  aux_veto: >-
+                    {% set raw = '' %}
+                    {% if aux_probe is defined and aux_probe is mapping %}
+                      {% if aux_probe.stdout is defined %}
+                        {% set raw = aux_probe.stdout %}
+                      {% elif aux_probe.content is defined %}
+                        {% set raw = aux_probe.content %}
+                      {% endif %}
+                    {% endif %}
+                    {% if raw is mapping %}{% set r = raw %}
+                    {% elif raw is string and raw | trim != ''
+                          and (raw | trim).startswith('{') %}
+                      {% set r = raw | from_json %}
+                    {% else %}{% set r = {} %}{% endif %}
+                    {% set name = (r.scene | default('')) | string
+                                  | lower | trim %}
+                    {% set age = r.age | default(none) %}
+                    {{ age is number
+                       and age <= aux_scene_window | float(20)
+                       and name in aux_off_names }}
+              - if:
+                  - condition: template
+                    value_template: "{{ aux_veto }}"
+                then:
+                  - action: light.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ load_lights }}"
+      - conditions:
+          - condition: trigger
+            id: aux_off
+          - condition: template
+            value_template: "{{ aux_press }}"
+        sequence:
+          - action: light.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ load_lights }}"
+
+      # ==============================================================
+      # UP 1x - room on: cans at the band level, Natural Light scene
+      # ==============================================================
+      - conditions:
+          - condition: template
+            value_template: >-
+              {{ scene_id == up_paddle_scene and key == 0 }}
+        sequence:
+          # Cans and Hue side by side. Sequentially the Z-Wave call went
+          # first, so a slow switch held the whole room dark: a measured
+          # paddle press spent 7.19s inside light.turn_on before the
+          # 0.17s scene recall was even reached
+          - parallel:
+              - if:
+                  - condition: template
+                    value_template: "{{ band_pct | int > 0 }}"
+                then:
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ load_lights }}"
+                    data:
+                      brightness_pct: "{{ band_pct | int }}"
+                else:
+                  # Band is 0: the paddle already switched the load on
+                  # locally, so undo it and let the smart bulbs light the room
+                  - action: light.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ load_lights }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ scene_ok and hue_scene != '' }}"
+                then:
+                  - action: scene.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ hue_scene }}"
 
       # ==============================================================
       # UP 2x - Full Bright (house grammar: double tap means 100%)
@@ -560,32 +1029,35 @@ actions:
             value_template: >-
               {{ scene_id == up_paddle_scene and key == 3 }}
         sequence:
-          - action: light.turn_on
-            continue_on_error: true
-            target:
-              entity_id: "{{ dimmer_light }}"
-            data:
-              brightness_pct: "{{ full_bright_pct | int }}"
-          - if:
-              - condition: template
-                value_template: >-
-                  {{ full_bright_hue and hue_light_domain | length > 0 }}
-            then:
+          # Same reasoning as UP 1x: the Hue side must not queue behind
+          # the Z-Wave switch
+          - parallel:
               - action: light.turn_on
                 continue_on_error: true
                 target:
-                  entity_id: "{{ hue_light_domain }}"
+                  entity_id: "{{ load_lights }}"
                 data:
-                  brightness_pct: 100
-          - if:
-              - condition: template
-                value_template: >-
-                  {{ full_bright_hue and hue_other_domain | length > 0 }}
-            then:
-              - action: homeassistant.turn_on
-                continue_on_error: true
-                target:
-                  entity_id: "{{ hue_other_domain }}"
+                  brightness_pct: "{{ full_bright_pct | int }}"
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ full_bright_hue and hue_light_domain | length > 0 }}
+                then:
+                  - action: light.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ hue_light_domain }}"
+                    data:
+                      brightness_pct: 100
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ full_bright_hue and hue_other_domain | length > 0 }}
+                then:
+                  - action: homeassistant.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ hue_other_domain }}"
 
       # ==============================================================
       # UP 3x - escape hatch
@@ -605,19 +1077,22 @@ actions:
             value_template: >-
               {{ scene_id == down_paddle_scene and key == 0 }}
         sequence:
-          - action: light.turn_off
-            continue_on_error: true
-            target:
-              entity_id: "{{ dimmer_light }}"
-          - if:
-              - condition: template
-                value_template: >-
-                  {{ off_includes_hue and hue_lights | length > 0 }}
-            then:
-              - action: homeassistant.turn_off
+          # Off is the gesture where a stall is most obvious - the room
+          # stays lit while the sequence waits - so fan it out too
+          - parallel:
+              - action: light.turn_off
                 continue_on_error: true
                 target:
-                  entity_id: "{{ hue_lights }}"
+                  entity_id: "{{ load_lights }}"
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ off_includes_hue and hue_lights | length > 0 }}
+                then:
+                  - action: homeassistant.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ hue_lights }}"
 
       # ==============================================================
       # DOWN 2x - Lamps Only: kill the overheads, raise Natural Light
@@ -627,18 +1102,19 @@ actions:
             value_template: >-
               {{ scene_id == down_paddle_scene and key == 3 }}
         sequence:
-          - action: light.turn_off
-            continue_on_error: true
-            target:
-              entity_id: "{{ dimmer_light }}"
-          - if:
-              - condition: template
-                value_template: "{{ scene_ok and lamps_scene != '' }}"
-            then:
-              - action: scene.turn_on
+          - parallel:
+              - action: light.turn_off
                 continue_on_error: true
                 target:
-                  entity_id: "{{ lamps_scene }}"
+                  entity_id: "{{ load_lights }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ scene_ok and lamps_scene != '' }}"
+                then:
+                  - action: scene.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ lamps_scene }}"
 
       # ==============================================================
       # DOWN 3x - escape hatch
