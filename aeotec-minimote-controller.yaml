@@ -1,0 +1,174 @@
+---
+blueprint:
+  name: "Aeotec Minimote Controller"
+  description: >-
+    Attach actions to the 4 buttons of an Aeotec / AEON Labs Minimote (DSA03XXX-ZW,
+    white or black) on Z-Wave JS. Each button has a Press and a Hold action; the
+    remote sends Hold once, about a second into the press (there is no double-tap).
+
+
+    The remote must be in **Scene mode** (parameters 241-244 = Scene Mode, 250 = Enable,
+    the Z-Wave JS defaults). In that mode a press sends Scene Activation scene 2N-1 and a
+    hold sends scene 2N for button N. Some black units run firmware that reports
+    Central Scene ("Scene 001" + KeyPressed / KeyHeldDown / KeyReleased) instead; both
+    formats are decoded here, and the Central Scene units also get a Release action.
+
+
+    Every action can use `minimote_button` (1-4) and `minimote_action`
+    (press / hold / release). One instance per remote; give two remotes the same actions
+    to make them twins.
+  domain: automation
+  author: Ryan
+  input:
+    minimote_device:
+      name: Minimote
+      description: The Aeotec Minimote (Z-Wave JS device)
+      selector:
+        device:
+          filter:
+            - integration: zwave_js
+              manufacturer: AEON Labs
+              model: DSA03XXX-ZW
+            - integration: zwave_js
+              manufacturer: AEON Labs
+              model: DSA03202
+            - integration: zwave_js
+              manufacturer: Aeotec
+              model: DSA03XXX-ZW
+
+    button_1:
+      name: Button 1 (upper left)
+      collapsed: true
+      input:
+        button_1_press:
+          name: Press
+          default: []
+          selector:
+            action: {}
+        button_1_hold:
+          name: Hold
+          default: []
+          selector:
+            action: {}
+        button_1_release:
+          name: Release (Central Scene firmware only)
+          default: []
+          selector:
+            action: {}
+
+    button_2:
+      name: Button 2 (upper right)
+      collapsed: true
+      input:
+        button_2_press:
+          name: Press
+          default: []
+          selector:
+            action: {}
+        button_2_hold:
+          name: Hold
+          default: []
+          selector:
+            action: {}
+        button_2_release:
+          name: Release (Central Scene firmware only)
+          default: []
+          selector:
+            action: {}
+
+    button_3:
+      name: Button 3 (lower left)
+      collapsed: true
+      input:
+        button_3_press:
+          name: Press
+          default: []
+          selector:
+            action: {}
+        button_3_hold:
+          name: Hold
+          default: []
+          selector:
+            action: {}
+        button_3_release:
+          name: Release (Central Scene firmware only)
+          default: []
+          selector:
+            action: {}
+
+    button_4:
+      name: Button 4 (lower right)
+      collapsed: true
+      input:
+        button_4_press:
+          name: Press
+          default: []
+          selector:
+            action: {}
+        button_4_hold:
+          name: Hold
+          default: []
+          selector:
+            action: {}
+        button_4_release:
+          name: Release (Central Scene firmware only)
+          default: []
+          selector:
+            action: {}
+
+# parallel so a Hold arriving while the Press action is still running (or a press on
+# the twin remote) is never dropped.
+mode: parallel
+max: 10
+max_exceeded: silent
+
+triggers:
+  - trigger: event
+    event_type: zwave_js_value_notification
+    event_data:
+      device_id: !input minimote_device
+
+actions:
+  - variables:
+      _scene_mode: "{{ trigger.event.data.property == 'sceneId' }}"
+      _cs_label: "{{ trigger.event.data.label | default('') | string }}"
+      minimote_button: >-
+        {% if _scene_mode %}
+          {{ ((trigger.event.data.value | int(0) - 1) // 2) + 1 }}
+        {% elif _cs_label.startswith('Scene ') %}
+          {{ _cs_label[6:] | int(0) }}
+        {% else %}
+          0
+        {% endif %}
+      minimote_action: >-
+        {% if _scene_mode %}
+          {{ 'press' if (trigger.event.data.value | int(0)) % 2 == 1 else 'hold' }}
+        {% else %}
+          {% set v = trigger.event.data.value | string %}
+          {{ {'KeyPressed': 'press', 'KeyHeldDown': 'hold', 'KeyReleased': 'release'}.get(v, 'unknown') }}
+        {% endif %}
+  - choose:
+      - conditions: "{{ minimote_button == 1 and minimote_action == 'press' }}"
+        sequence: !input button_1_press
+      - conditions: "{{ minimote_button == 1 and minimote_action == 'hold' }}"
+        sequence: !input button_1_hold
+      - conditions: "{{ minimote_button == 1 and minimote_action == 'release' }}"
+        sequence: !input button_1_release
+      - conditions: "{{ minimote_button == 2 and minimote_action == 'press' }}"
+        sequence: !input button_2_press
+      - conditions: "{{ minimote_button == 2 and minimote_action == 'hold' }}"
+        sequence: !input button_2_hold
+      - conditions: "{{ minimote_button == 2 and minimote_action == 'release' }}"
+        sequence: !input button_2_release
+      - conditions: "{{ minimote_button == 3 and minimote_action == 'press' }}"
+        sequence: !input button_3_press
+      - conditions: "{{ minimote_button == 3 and minimote_action == 'hold' }}"
+        sequence: !input button_3_hold
+      - conditions: "{{ minimote_button == 3 and minimote_action == 'release' }}"
+        sequence: !input button_3_release
+      - conditions: "{{ minimote_button == 4 and minimote_action == 'press' }}"
+        sequence: !input button_4_press
+      - conditions: "{{ minimote_button == 4 and minimote_action == 'hold' }}"
+        sequence: !input button_4_hold
+      - conditions: "{{ minimote_button == 4 and minimote_action == 'release' }}"
+        sequence: !input button_4_release

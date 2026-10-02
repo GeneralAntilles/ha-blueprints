@@ -1,0 +1,1170 @@
+---
+blueprint:
+  name: Steamer Controller (Plug + Fan + Abandon Cutoff)
+  description: >-
+    A garment steamer (or any heating appliance) on a metered smart plug.
+    The appliance's own switch stays the control: the plug is normally ON
+    and the automation only steps in when needed.
+
+
+    (1) Exhaust fan: turns on when the appliance draws power (or when room
+    humidity crosses the on threshold, or exceeds an optional reference
+    sensor by the on offset) and off once the appliance has stopped and
+    humidity has settled for the purge time - at or below the off
+    threshold and, with a reference, back within the off offset of it
+    (with no humidity sensor: purge time after the appliance stops), with
+    min/max runtimes. Manually started fans are never turned off.
+
+
+    (2) Abandon cutoff: if the appliance is running and the room has had no
+    motion for N minutes (or it has run past a max runtime), the plug is
+    cut and the cut is remembered in the Plug Cut helper.
+
+
+    (3) Announcements: persistent notification, mobile notify actions and
+    TTS, per event.
+
+
+    (4) Re-enable: after a cut, the next time someone enters the room the
+    plug is switched back on as a probe and the meter is read directly.
+    If the appliance is already drawing power its switch was left on: the
+    plug is cut again and you are told to switch the appliance off (the
+    probe repeats every few minutes while someone is in the room). If it
+    is idle the plug stays on, and power appearing afterwards is treated
+    as a deliberate start. Pressing the plug's own button or turning the plug on from a
+    dashboard / HomeKit also re-enables it (the cut is forgotten).
+
+
+    Requires HA 2025.4+ and three input_booleans created manually with NO
+    "Initial" value (state must restore across restarts): Running helper,
+    Plug Cut helper, and (if a fan is configured) a Fan Tracking helper.
+    Power thresholds need hysteresis: On Watts must be above Idle Watts.
+    Off Delay absorbs thermostat cycling so a cycling appliance still
+    counts as running.
+  domain: automation
+  homeassistant:
+    min_version: 2025.4.0
+  input:
+    steamer:
+      name: Appliance & Plug
+      icon: mdi:iron
+      input:
+        plug_switch:
+          name: Smart Plug
+          description: The metered plug the appliance is plugged into
+          selector:
+            entity:
+              filter:
+                - domain: switch
+        power_sensor:
+          name: Plug Power Sensor
+          description: Power (W) sensor of that plug
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: power
+        running_flag:
+          name: Running Helper
+          description: >-
+            Input boolean marking "appliance is running" (power above On
+            Watts, held through Off Delay). Required.
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        plug_cut_flag:
+          name: Plug Cut Helper
+          description: >-
+            Input boolean marking "the plug is off because this automation
+            cut it" - drives the re-enable logic. Required.
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        on_watts:
+          name: On Watts
+          description: Power above this means the appliance is running
+          default: 50
+          selector:
+            number:
+              min: 1
+              max: 3000
+              unit_of_measurement: W
+        idle_watts:
+          name: Idle Watts
+          description: >-
+            Power below this (sustained for Off Delay) means the appliance
+            has stopped. Must be below On Watts.
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 3000
+              unit_of_measurement: W
+        off_delay:
+          name: Off Delay
+          description: >-
+            Seconds power must stay below Idle Watts before the appliance
+            counts as stopped (covers thermostat cycling)
+          default: 120
+          selector:
+            number:
+              min: 10
+              max: 1800
+              unit_of_measurement: seconds
+        appliance_name:
+          name: Appliance Name
+          description: Used in announcements ("The steamer ...")
+          default: steamer
+          selector:
+            text:
+    occupancy:
+      name: Occupancy & Cutoff
+      icon: mdi:motion-sensor
+      input:
+        motion_sensors:
+          name: Room Motion Sensors
+          description: >-
+            Motion / occupancy sensors in the room. Leave empty to disable
+            the no-motion cutoff and the automatic re-enable probe.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: binary_sensor
+                  device_class:
+                    - motion
+                    - occupancy
+        no_motion_minutes:
+          name: No-Motion Cutoff
+          description: >-
+            Cut the plug when the appliance has been running with no
+            motion for this long (0 disables)
+          default: 10
+          selector:
+            number:
+              min: 0
+              max: 120
+              unit_of_measurement: minutes
+        steamer_max_runtime:
+          name: Maximum Runtime
+          description: >-
+            Cut the plug after the appliance has run this long, motion or
+            not (0 disables)
+          default: 120
+          selector:
+            number:
+              min: 0
+              max: 720
+              unit_of_measurement: minutes
+        auto_reenable:
+          name: Re-enable On Entry
+          description: >-
+            After a cut, probe the plug back on when someone enters the
+            room (and every 5 minutes while they stay). Off = only the
+            plug's button / a manual plug-on re-enables it.
+          default: true
+          selector:
+            boolean:
+        probe_seconds:
+          name: Probe Window
+          description: >-
+            After the plug-on and a forced meter read proved the
+            appliance idle, keep the plug on and watch this many more
+            seconds for someone switching it on deliberately. Meters that
+            only report periodically are fine - the verdict comes from the
+            forced read, not from report timing.
+          default: 10
+          selector:
+            number:
+              min: 5
+              max: 60
+              unit_of_measurement: seconds
+        probe_cooldown:
+          name: Probe Cooldown
+          description: Minimum minutes between two probes
+          default: 2
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+    humidity_fan:
+      name: Humidity & Fan (optional)
+      icon: mdi:fan
+      collapsed: true
+      input:
+        fan_entities:
+          name: Exhaust Fans
+          description: Fans and/or switches to control (prefer one entity)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - fan
+                    - switch
+                    - light
+        fan_auto_flag:
+          name: Fan Tracking Helper
+          description: >-
+            Input boolean marking "fan is on because of this automation".
+            Required for fan control to be active.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+        humidity_sensors:
+          name: Room Humidity Sensors
+          description: >-
+            Optional. Highest valid reading is used. Without one, the fan
+            purge runs for the purge time after the appliance stops.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: sensor
+                  device_class: humidity
+        humidity_on_threshold:
+          name: Humidity On Threshold
+          description: Fan also turns on above this humidity (any cause)
+          default: 65
+          selector:
+            number:
+              min: 30
+              max: 100
+              unit_of_measurement: "%"
+        humidity_off_threshold:
+          name: Humidity Off Threshold
+          description: >-
+            Humidity is "settled" at or below this (must be BELOW the on
+            threshold - the gap is the hysteresis). With a reference
+            sensor set, this is only a backstop - put it high enough that
+            a humid day's ambient does not block the settle.
+          default: 60
+          selector:
+            number:
+              min: 30
+              max: 100
+              unit_of_measurement: "%"
+        reference_humidity_sensor:
+          name: Reference Humidity Sensor (Optional)
+          description: >-
+            Baseline humidity sensor elsewhere in the house (a thermostat
+            works well). The fan also starts when the room exceeds it by
+            the on offset, and "settled" additionally requires the room to
+            be back within the off offset of it - so seasonal humidity
+            does not keep the fan running.
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: humidity
+        reference_on_offset:
+          name: Reference On Offset
+          description: Fan turns on when the room exceeds the reference by this
+          default: 12
+          selector:
+            number:
+              min: 1
+              max: 50
+              unit_of_measurement: "%"
+        reference_off_offset:
+          name: Reference Off Offset
+          description: >-
+            Settled requires the room within this much of the reference
+            (must be below the on offset)
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 50
+              unit_of_measurement: "%"
+        fan_purge_minutes:
+          name: Fan Purge Time
+          description: >-
+            Appliance stopped (and humidity settled, if measured) must
+            hold this long before the fan stops
+          default: 5
+          selector:
+            number:
+              min: 0
+              max: 60
+              unit_of_measurement: minutes
+        fan_min_runtime:
+          name: Fan Minimum Runtime
+          description: Auto-started fans run at least this long
+          default: 5
+          selector:
+            number:
+              min: 1
+              max: 60
+              unit_of_measurement: minutes
+        fan_max_runtime:
+          name: Fan Maximum Runtime
+          description: Auto-started fans are forced off after this long
+          default: 60
+          selector:
+            number:
+              min: 5
+              max: 240
+              unit_of_measurement: minutes
+    announcements:
+      name: Announcements
+      icon: mdi:bullhorn
+      collapsed: true
+      input:
+        announce_events:
+          name: Announce These Events
+          default:
+            - auto_off
+            - max_runtime
+            - still_on
+            - reenabled
+            - fan_max
+          selector:
+            select:
+              multiple: true
+              options:
+                - label: Plug cut - no motion
+                  value: auto_off
+                - label: Plug cut - maximum runtime
+                  value: max_runtime
+                - label: Appliance still switched on (probe failed)
+                  value: still_on
+                - label: Plug re-enabled
+                  value: reenabled
+                - label: Fan maximum runtime cutoff
+                  value: fan_max
+        persistent_notifications:
+          name: Persistent Notifications
+          description: Also raise a persistent notification in the HA UI
+          default: true
+          selector:
+            boolean:
+        notify_actions:
+          name: Mobile Notify Actions
+          description: >-
+            Comma-separated notify actions, e.g. notify.iphone_13_pro,
+            notify.ipad_pro (empty = none)
+          default: ""
+          selector:
+            text:
+        tts_engine:
+          name: TTS Engine
+          description: Text-to-speech entity for spoken announcements
+          default: ""
+          selector:
+            entity:
+              filter:
+                - domain: tts
+        tts_players:
+          name: TTS Speakers
+          description: Media players to speak on (empty = no TTS)
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: media_player
+
+mode: queued
+max: 25
+max_exceeded: warning
+
+trigger_variables:
+  tv_running_flag: !input running_flag
+  tv_auto_reenable: !input auto_reenable
+  tv_motion_sensors: !input motion_sensors
+  tv_no_motion_minutes: !input no_motion_minutes
+  tv_max_runtime: !input steamer_max_runtime
+  tv_humidity_sensors: !input humidity_sensors
+  tv_on_threshold: !input humidity_on_threshold
+  tv_off_threshold: !input humidity_off_threshold
+  tv_reference: !input reference_humidity_sensor
+  tv_ref_on_offset: !input reference_on_offset
+  tv_ref_off_offset: !input reference_off_offset
+
+triggers:
+  # ------------------------------------------------------------------
+  # Appliance power
+  # ------------------------------------------------------------------
+  - trigger: numeric_state
+    entity_id: !input power_sensor
+    above: !input on_watts
+    id: steamer_on
+  - trigger: numeric_state
+    entity_id: !input power_sensor
+    below: !input idle_watts
+    for:
+      seconds: !input off_delay
+    id: steamer_idle
+  # numeric_state never fires on unavailable -> number, so a meter that
+  # recovers straight into a high reading needs its own edge
+  - trigger: state
+    entity_id: !input power_sensor
+    from:
+      - unavailable
+      - unknown
+    id: power_recovered
+  # ------------------------------------------------------------------
+  # Cutoffs. Abandoned = running with every motion sensor reporting
+  # "off" (an unavailable sensor blocks the cutoff rather than causing
+  # it). for: 0 would fire immediately, so the triggers are gated by
+  # enabled: instead.
+  # ------------------------------------------------------------------
+  - trigger: template
+    value_template: >-
+      {% set ms = expand(tv_motion_sensors) | list %}
+      {{ is_state(tv_running_flag, 'on') and ms | length > 0
+         and ms | rejectattr('state', 'eq', 'off') | list | count == 0 }}
+    for:
+      minutes: !input no_motion_minutes
+    enabled: >-
+      {{ tv_no_motion_minutes | float(0) > 0
+         and tv_motion_sensors | length > 0 }}
+    id: abandoned
+  - trigger: state
+    entity_id: !input running_flag
+    to: "on"
+    for:
+      minutes: !input steamer_max_runtime
+    enabled: "{{ tv_max_runtime | float(0) > 0 }}"
+    id: max_runtime
+  # ------------------------------------------------------------------
+  # Re-enable probe: on entry, then every 5 min while occupied
+  # ------------------------------------------------------------------
+  - trigger: state
+    entity_id: !input motion_sensors
+    from:
+      - "off"
+      - unavailable
+      - unknown
+    to: "on"
+    id: probe_entry
+  - trigger: time_pattern
+    minutes: "/5"
+    enabled: >-
+      {{ tv_auto_reenable and tv_motion_sensors | length > 0 }}
+    id: probe_retry
+  # Manual re-enable (plug button, dashboard, HomeKit) forgets the cut
+  - trigger: state
+    entity_id: !input plug_switch
+    from: "off"
+    to: "on"
+    id: plug_on
+  # ------------------------------------------------------------------
+  # Humidity / fan
+  # ------------------------------------------------------------------
+  - trigger: template
+    value_template: >-
+      {% if tv_humidity_sensors | length > 0 %}
+        {% set vals = tv_humidity_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {{ vals | length > 0 and (vals | max) > tv_on_threshold | float }}
+      {% else %} false {% endif %}
+    id: humidity_high
+  - trigger: template
+    value_template: >-
+      {% if tv_humidity_sensors | length > 0 and tv_reference != '' %}
+        {% set vals = tv_humidity_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {{ vals | length > 0 and is_number(states(tv_reference))
+           and (vals | max) - states(tv_reference) | float
+               > tv_ref_on_offset | float }}
+      {% else %} false {% endif %}
+    id: humidity_high
+  # Settled = appliance stopped AND humidity settled (no sensor: always;
+  # else at or below the off threshold AND, with a reference, within the
+  # off offset of it - an unreadable reference blocks the settle),
+  # sustained for the purge time
+  - trigger: template
+    value_template: >-
+      {% if is_state(tv_running_flag, 'on') %} false
+      {% elif tv_humidity_sensors | length == 0 %} true
+      {% else %}
+        {% set vals = tv_humidity_sensors | map('states')
+           | select('is_number') | map('float') | list %}
+        {% set room = (vals | max) if vals | length > 0 else none %}
+        {% set abs_ok = room is not none
+           and room <= tv_off_threshold | float %}
+        {% set ref_ok = tv_reference == ''
+           or (is_number(states(tv_reference)) and room is not none
+               and room - states(tv_reference) | float
+                   <= tv_ref_off_offset | float) %}
+        {{ abs_ok and ref_ok }}
+      {% endif %}
+    for:
+      minutes: !input fan_purge_minutes
+    id: settled
+  - trigger: state
+    entity_id: !input fan_entities
+    to: "on"
+    for:
+      minutes: !input fan_min_runtime
+    id: fan_min_elapsed
+  - trigger: state
+    entity_id: !input fan_entities
+    to: "on"
+    for:
+      minutes: !input fan_max_runtime
+    id: fan_max_elapsed
+  - trigger: state
+    entity_id: !input fan_entities
+    from: "on"
+    to: "off"
+    id: fan_off
+  # ------------------------------------------------------------------
+  # Reconcile
+  # ------------------------------------------------------------------
+  - trigger: homeassistant
+    event: start
+    id: reconcile
+  - trigger: time_pattern
+    minutes: "/15"
+    id: reconcile
+
+variables:
+  plug_switch: !input plug_switch
+  power_sensor: !input power_sensor
+  running_flag: !input running_flag
+  plug_cut_flag: !input plug_cut_flag
+  on_watts: !input on_watts
+  idle_watts: !input idle_watts
+  off_delay: !input off_delay
+  appliance_name: !input appliance_name
+  motion_sensors: !input motion_sensors
+  no_motion_minutes: !input no_motion_minutes
+  steamer_max_runtime: !input steamer_max_runtime
+  auto_reenable: !input auto_reenable
+  probe_seconds: !input probe_seconds
+  probe_cooldown: !input probe_cooldown
+  fan_entities: !input fan_entities
+  fan_auto_flag: !input fan_auto_flag
+  humidity_sensors: !input humidity_sensors
+  humidity_off_threshold: !input humidity_off_threshold
+  reference_humidity_sensor: !input reference_humidity_sensor
+  reference_off_offset: !input reference_off_offset
+  fan_min_runtime: !input fan_min_runtime
+  fan_max_runtime: !input fan_max_runtime
+  fan_purge_minutes: !input fan_purge_minutes
+  announce_events: !input announce_events
+  persistent_notifications: !input persistent_notifications
+  notify_actions: !input notify_actions
+  tts_engine: !input tts_engine
+  tts_players: !input tts_players
+  # ---- derived facts (per-run snapshots; recompute live via states() in
+  # any branch that mutates what it reads) ----
+  power_valid: "{{ is_number(states(power_sensor)) }}"
+  power_value: "{{ states(power_sensor) | float(-1) }}"
+  steamer_drawing: "{{ power_valid and power_value > on_watts | float }}"
+  power_idle_seconds: >-
+    {% if power_valid and power_value < idle_watts | float %}
+      {{ (as_timestamp(now())
+          - as_timestamp(states[power_sensor].last_changed)) | int }}
+    {% else %} 0 {% endif %}
+  running: "{{ is_state(running_flag, 'on') }}"
+  running_seconds: >-
+    {% if running %}
+      {{ (as_timestamp(now())
+          - as_timestamp(states[running_flag].last_changed)) | int }}
+    {% else %} 0 {% endif %}
+  # How long the appliance has been stopped (0 while running)
+  stopped_seconds: >-
+    {% if is_state(running_flag, 'off') %}
+      {{ (as_timestamp(now())
+          - as_timestamp(states[running_flag].last_changed)) | int }}
+    {% else %} 0 {% endif %}
+  plug_cut: "{{ is_state(plug_cut_flag, 'on') }}"
+  plug_off_seconds: >-
+    {% if is_state(plug_switch, 'off') %}
+      {{ (as_timestamp(now())
+          - as_timestamp(states[plug_switch].last_changed)) | int }}
+    {% else %} 0 {% endif %}
+  is_motion_active: >-
+    {{ expand(motion_sensors) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  motion_all_off: >-
+    {% set ms = expand(motion_sensors) | list %}
+    {{ ms | length > 0
+       and ms | rejectattr('state', 'eq', 'off') | list | count == 0 }}
+  # No sensors => a huge idle value (never reads as recent occupancy)
+  motion_idle_seconds: >-
+    {% set ms = expand(motion_sensors) | list %}
+    {% if ms | length == 0 %} 999999999
+    {% elif is_motion_active %} 0
+    {% else %}
+      {{ (as_timestamp(now()) - (ms | map(attribute='last_changed')
+         | map('as_timestamp') | max)) | int }}
+    {% endif %}
+  fan_configured: "{{ fan_entities | length > 0 and fan_auto_flag != '' }}"
+  any_fan_on: >-
+    {{ expand(fan_entities) | selectattr('state', 'eq', 'on')
+       | list | count > 0 }}
+  all_fans_off: >-
+    {{ expand(fan_entities) | rejectattr('state', 'eq', 'off')
+       | list | count == 0 }}
+  fan_on_seconds: >-
+    {% set on_fans = expand(fan_entities)
+       | selectattr('state', 'eq', 'on') | list %}
+    {% if on_fans | length > 0 %}
+      {{ (as_timestamp(now()) - (on_fans | map(attribute='last_changed')
+         | map('as_timestamp') | max)) | int }}
+    {% else %} 0 {% endif %}
+  humidity_settled_now: >-
+    {% if humidity_sensors | length == 0 %} true
+    {% else %}
+      {% set vals = humidity_sensors | map('states')
+         | select('is_number') | map('float') | list %}
+      {% set room = (vals | max) if vals | length > 0 else none %}
+      {% set abs_ok = room is not none
+         and room <= humidity_off_threshold | float %}
+      {% set ref_ok = reference_humidity_sensor == ''
+         or (is_number(states(reference_humidity_sensor))
+             and room is not none
+             and room - states(reference_humidity_sensor) | float
+                 <= reference_off_offset | float) %}
+      {{ abs_ok and ref_ok }}
+    {% endif %}
+  settled_now: "{{ not running and humidity_settled_now }}"
+  notify_list: >-
+    {% set raw = notify_actions if notify_actions is string else '' %}
+    {{ raw.split(',') | map('trim') | reject('eq', '') | list }}
+  cut_message: >-
+    Switch the {{ appliance_name }} off; the plug comes back on the next
+    time someone comes in.
+
+actions:
+  # Branches set these two; the shared announcement block at the end
+  # delivers them (HA 2025.4+ script-wide variable scope).
+  - variables:
+      announce_kind: ""
+      announce_message: ""
+  - choose:
+      # ==============================================================
+      # RECONCILE (ha_start + every 15 min): idempotent. Heals every
+      # countdown lost to reloads/restarts and stale helper flags.
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: reconcile
+        sequence:
+          # (1) stale fan ownership
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_auto_flag != '' and states(fan_auto_flag) == 'on'
+                     and not any_fan_on }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+          # (2) cut remembered but plug on = a probe interrupted by a
+          # reload, or a manual plug-on we missed. Judge it by power:
+          # drawing -> finish the failed probe (cut again), idle -> forget
+          # the cut. Unreadable power keeps the cut until it recovers.
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ plug_cut and is_state(plug_switch, 'on') and power_valid }}
+            then:
+              - if:
+                  - condition: template
+                    value_template: "{{ steamer_drawing }}"
+                then:
+                  - action: homeassistant.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ plug_switch }}"
+                  - variables:
+                      announce_kind: still_on
+                      announce_message: >-
+                        The {{ appliance_name }} is still switched on, so
+                        its plug stays off. Switch the {{ appliance_name }}
+                        off and the plug will come back on by itself (or
+                        turn the plug on yourself).
+                else:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ plug_cut_flag }}"
+          # (3) missed idle: running flag on but power idle past the delay
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ running and power_idle_seconds >= off_delay | int }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ running_flag }}"
+          # (4) missed start: drawing power with the flag off (not mid-probe)
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ not running and steamer_drawing
+                     and not is_state(plug_cut_flag, 'on') }}
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ running_flag }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ fan_configured and all_fans_off }}"
+                then:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ fan_auto_flag }}"
+                  - action: homeassistant.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: !input fan_entities
+          # (5) missed cutoffs (same rules as the direct branches)
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ running and is_state(plug_switch, 'on')
+                     and ((no_motion_minutes | int > 0 and motion_all_off
+                           and motion_idle_seconds
+                               >= no_motion_minutes | int * 60
+                           and running_seconds
+                               >= no_motion_minutes | int * 60)
+                          or (steamer_max_runtime | int > 0
+                              and running_seconds
+                                  >= steamer_max_runtime | int * 60)) }}
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ plug_cut_flag }}"
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ plug_switch }}"
+              - variables:
+                  announce_kind: >-
+                    {{ 'max_runtime'
+                       if (steamer_max_runtime | int > 0
+                           and running_seconds
+                               >= steamer_max_runtime | int * 60)
+                       else 'auto_off' }}
+                  announce_message: >-
+                    {% if announce_kind == 'max_runtime' %}
+                      The {{ appliance_name }} has been running for
+                      {{ steamer_max_runtime | int }} minutes, so its plug
+                      has been switched off. {{ cut_message }}
+                    {% else %}
+                      The {{ appliance_name }} was left running with nobody
+                      around, so its plug has been switched off.
+                      {{ cut_message }}
+                    {% endif %}
+          # (6) missed fan-off / fan max cutoff. "Settled" must have held
+          # for the purge time, like the live trigger's for: - the
+          # appliance-stopped clock is the helper's age (humidity has no
+          # duration clock; it only has to be settled right now).
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ fan_configured and states(fan_auto_flag) == 'on'
+                     and any_fan_on
+                     and ((settled_now
+                           and stopped_seconds >= fan_purge_minutes | int * 60
+                           and fan_on_seconds >= fan_min_runtime | int * 60)
+                          or fan_on_seconds >= fan_max_runtime | int * 60) }}
+            then:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ fan_on_seconds >= fan_max_runtime | int * 60 }}
+                then:
+                  - variables:
+                      announce_kind: fan_max
+                      announce_message: >-
+                        The {{ appliance_name }} fan reached its maximum
+                        runtime and was switched off.
+          # (7) configuration / sensor faults (idempotent notification)
+          - variables:
+              config_faults: >-
+                {% set f = [] %}
+                {% if fan_entities | length > 0 and fan_auto_flag == '' %}
+                  {% set f = f + ['fan needs a Fan Tracking Helper'] %}
+                {% endif %}
+                {% if idle_watts | float >= on_watts | float %}
+                  {% set f = f + ['Idle Watts must be below On Watts'] %}
+                {% endif %}
+                {% if not power_valid %}
+                  {% set f = f + ['plug power sensor is unavailable - no
+                     running detection or cutoffs until it recovers'] %}
+                {% endif %}
+                {% if reference_humidity_sensor != ''
+                   and not is_number(states(reference_humidity_sensor)) %}
+                  {% set f = f + ['reference humidity sensor is unavailable -
+                     the fan cannot settle until it recovers'] %}
+                {% endif %}
+                {{ f }}
+          - if:
+              - condition: template
+                value_template: "{{ config_faults | length > 0 }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  title: Steamer Controller configuration
+                  message: >-
+                    {{ this.attributes.friendly_name }}:
+                    {{ config_faults | join('; ') }}.
+                  notification_id: "sc_config_{{ this.entity_id }}"
+            else:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: "sc_config_{{ this.entity_id }}"
+
+      # ==============================================================
+      # FLAG HYGIENE - fan ownership clears on any fan-off
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: fan_off
+          - condition: template
+            value_template: "{{ fan_auto_flag != '' and not any_fan_on }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ fan_auto_flag }}"
+
+      # ==============================================================
+      # APPLIANCE RUNNING / STOPPED. The Running helper is the edge
+      # detector: a thermostat-cycling appliance re-crosses On Watts many
+      # times per session, but the fan is only started on the off->on
+      # edge of the helper. Power seen while the plug is cut is a probe
+      # (or a manual plug-on, whose branch clears the cut first).
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id:
+              - steamer_on
+              - power_recovered
+          - condition: template
+            value_template: >-
+              {{ not plug_cut and not running
+                 and is_number(states(power_sensor))
+                 and states(power_sensor) | float > on_watts | float }}
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ running_flag }}"
+          - if:
+              - condition: template
+                value_template: "{{ fan_configured and all_fans_off }}"
+            then:
+              - action: input_boolean.turn_on
+                target:
+                  entity_id: "{{ fan_auto_flag }}"
+              - action: homeassistant.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: !input fan_entities
+      - conditions:
+          - condition: trigger
+            id: steamer_idle
+          - condition: template
+            value_template: "{{ running }}"
+        sequence:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: "{{ running_flag }}"
+
+      # ==============================================================
+      # CUTOFFS: no motion / maximum runtime
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id:
+              - abandoned
+              - max_runtime
+          - condition: template
+            value_template: "{{ running and is_state(plug_switch, 'on') }}"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ plug_cut_flag }}"
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ plug_switch }}"
+          - variables:
+              announce_kind: >-
+                {{ 'max_runtime' if trigger.id == 'max_runtime'
+                   else 'auto_off' }}
+              announce_message: >-
+                {% if trigger.id == 'max_runtime' %}
+                  The {{ appliance_name }} has been running for
+                  {{ steamer_max_runtime | int }} minutes, so its plug has
+                  been switched off. {{ cut_message }}
+                {% else %}
+                  The {{ appliance_name }} was left running with nobody
+                  around, so its plug has been switched off.
+                  {{ cut_message }}
+                {% endif %}
+
+      # ==============================================================
+      # RE-ENABLE PROBE (entry, then every 5 min while occupied). The
+      # cut flag stays ON during the probe so power seen here is never
+      # mistaken for a session start. Needs a live power reading.
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id:
+              - probe_entry
+              - probe_retry
+          - condition: template
+            value_template: >-
+              {{ auto_reenable and plug_cut and is_state(plug_switch, 'off')
+                 and power_valid and is_motion_active
+                 and plug_off_seconds >= probe_cooldown | int * 60 }}
+        sequence:
+          - action: homeassistant.turn_on
+            continue_on_error: true
+            target:
+              entity_id: "{{ plug_switch }}"
+          # A left-on appliance draws the instant the relay closes. Ask
+          # the meter directly instead of waiting for its next periodic
+          # report (the DSC06 only reports on a timer).
+          - delay:
+              seconds: 2
+          - action: zwave_js.refresh_value
+            continue_on_error: true
+            target:
+              entity_id: "{{ power_sensor }}"
+          - delay:
+              seconds: 3
+          - choose:
+              # Drawing already: the switch was left on
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ is_number(states(power_sensor))
+                         and states(power_sensor) | float
+                             > on_watts | float }}
+                sequence:
+                  - action: homeassistant.turn_off
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ plug_switch }}"
+                  - variables:
+                      announce_kind: still_on
+                      announce_message: >-
+                        The {{ appliance_name }} is still switched on, so
+                        its plug stays off. Switch the {{ appliance_name }}
+                        off and the plug will come back on by itself (or
+                        turn the plug on yourself).
+              # Idle and the plug really is on: the cut is over. Anything
+              # drawn from here on is someone using it deliberately.
+              - conditions:
+                  - condition: template
+                    value_template: >-
+                      {{ is_state(plug_switch, 'on')
+                         and is_number(states(power_sensor)) }}
+                sequence:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ plug_cut_flag }}"
+                  - variables:
+                      announce_kind: reenabled
+                      announce_message: >-
+                        The {{ appliance_name }} plug is back on.
+                  - wait_template: >-
+                      {{ is_number(states(power_sensor))
+                         and states(power_sensor) | float
+                             > on_watts | float }}
+                    timeout:
+                      seconds: !input probe_seconds
+                    continue_on_timeout: true
+                  - if:
+                      - condition: template
+                        value_template: "{{ not wait.completed }}"
+                    then:
+                      - action: zwave_js.refresh_value
+                        continue_on_error: true
+                        target:
+                          entity_id: "{{ power_sensor }}"
+                      - delay:
+                          seconds: 3
+                  # Deliberate start inside the window: begin the session
+                  # here (its steamer_on edge fired while the cut was
+                  # still on, or never fired for a periodic meter)
+                  - if:
+                      - condition: template
+                        value_template: >-
+                          {{ not is_state(running_flag, 'on')
+                             and is_number(states(power_sensor))
+                             and states(power_sensor) | float
+                                 > on_watts | float }}
+                    then:
+                      - action: input_boolean.turn_on
+                        target:
+                          entity_id: "{{ running_flag }}"
+                      - if:
+                          - condition: template
+                            value_template: >-
+                              {{ fan_configured and all_fans_off }}
+                        then:
+                          - action: input_boolean.turn_on
+                            target:
+                              entity_id: "{{ fan_auto_flag }}"
+                          - action: homeassistant.turn_on
+                            continue_on_error: true
+                            target:
+                              entity_id: !input fan_entities
+            # Plug-on failed or the meter went unreadable: keep the cut,
+            # make sure the plug is off, retry on the next probe
+            default:
+              - action: homeassistant.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ plug_switch }}"
+
+      # Manual plug-on while cut (plug button, dashboard, HomeKit):
+      # forget the cut. A probe's own plug-on also lands here (queued
+      # behind the probe); after a failed probe the plug is off again by
+      # the time this runs, so the live re-check keeps the cut.
+      - conditions:
+          - condition: trigger
+            id: plug_on
+          - condition: template
+            value_template: "{{ plug_cut }}"
+        sequence:
+          - delay:
+              seconds: 5
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ is_state(plug_switch, 'on')
+                     and is_state(plug_cut_flag, 'on') }}
+            then:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: "{{ plug_cut_flag }}"
+              # Its steamer_on edge may already have been swallowed by
+              # the cut, so start the session here if it is drawing
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ not is_state(running_flag, 'on')
+                         and is_number(states(power_sensor))
+                         and states(power_sensor) | float
+                             > on_watts | float }}
+                then:
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ running_flag }}"
+                  - if:
+                      - condition: template
+                        value_template: "{{ fan_configured and all_fans_off }}"
+                    then:
+                      - action: input_boolean.turn_on
+                        target:
+                          entity_id: "{{ fan_auto_flag }}"
+                      - action: homeassistant.turn_on
+                        continue_on_error: true
+                        target:
+                          entity_id: !input fan_entities
+
+      # ==============================================================
+      # HUMIDITY / FAN
+      # ==============================================================
+      - conditions:
+          - condition: trigger
+            id: humidity_high
+          - condition: template
+            value_template: "{{ fan_configured and all_fans_off }}"
+        sequence:
+          - action: input_boolean.turn_on
+            target:
+              entity_id: "{{ fan_auto_flag }}"
+          - action: homeassistant.turn_on
+            continue_on_error: true
+            target:
+              entity_id: !input fan_entities
+      # Whichever of settle / min-runtime finishes LAST turns the fan off
+      - conditions:
+          - condition: trigger
+            id:
+              - settled
+              - fan_min_elapsed
+          - condition: template
+            value_template: >-
+              {{ fan_configured and states(fan_auto_flag) == 'on'
+                 and any_fan_on and settled_now
+                 and fan_on_seconds >= fan_min_runtime | int * 60 }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input fan_entities
+      - conditions:
+          - condition: trigger
+            id: fan_max_elapsed
+          - condition: template
+            value_template: >-
+              {{ fan_configured and states(fan_auto_flag) == 'on'
+                 and any_fan_on }}
+        sequence:
+          - action: homeassistant.turn_off
+            continue_on_error: true
+            target:
+              entity_id: !input fan_entities
+          - variables:
+              announce_kind: fan_max
+              announce_message: >-
+                The {{ appliance_name }} fan reached its maximum runtime
+                and was switched off.
+
+  # ==================================================================
+  # ANNOUNCEMENT (shared): persistent notification, mobile notify, TTS
+  # ==================================================================
+  - variables:
+      announce_text: >-
+        {{ announce_message | trim | regex_replace('\\s+', ' ') }}
+  - if:
+      - condition: template
+        value_template: >-
+          {{ announce_text != '' and announce_kind in announce_events }}
+    then:
+      - if:
+          - condition: template
+            value_template: "{{ persistent_notifications }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              title: Steamer Controller
+              message: >-
+                {{ this.attributes.friendly_name }}:
+                {{ announce_text }}
+              notification_id: "sc_{{ announce_kind }}_{{ this.entity_id }}"
+      - repeat:
+          for_each: "{{ notify_list }}"
+          sequence:
+            - action: "{{ repeat.item }}"
+              continue_on_error: true
+              data:
+                title: "{{ appliance_name | capitalize }}"
+                message: "{{ announce_text }}"
+      - if:
+          - condition: template
+            value_template: >-
+              {{ tts_engine != '' and tts_players | length > 0 }}
+        then:
+          - action: tts.speak
+            continue_on_error: true
+            target:
+              entity_id: "{{ tts_engine }}"
+            data:
+              media_player_entity_id: "{{ tts_players }}"
+              message: "{{ announce_text }}"

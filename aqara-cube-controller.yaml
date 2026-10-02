@@ -1,0 +1,676 @@
+---
+blueprint:
+  name: "Aqara Cube Controller (ZHA)"
+  description: >-
+    Attach actions to every gesture of an Aqara Cube (T1 Pro `lumi.remote.cagl02`,
+    or the older `lumi.sensor_cube` / `.aqgl01`) paired through ZHA.
+
+
+    **The cube must be in Action mode** for tap / slide / flip to reach Home Assistant
+    (only shake and rotate work in Scene mode under ZHA). To switch modes: pop the back
+    plate off and click the LINK button 5 times in a row.
+
+
+    Gestures: Shake, Tap (knock the cube twice on the table - a single knock sends nothing),
+    Slide (push it across the table), Flip 90°, Flip 180°, Rotate Left / Right, and Throw.
+
+
+    **Faces as modes.** Tap, slide, rotate and flip can each have a different action
+    depending on which face is ON TOP (collapsed "Face N" sections below), so the face you
+    leave up decides what the cube controls - e.g. face 1 = lights, face 2 = fan,
+    face 3 = TV. Shake and throw are face-independent. Tap, slide and flip report their
+    face natively. Rotate does not, so to use per-face rotate (or face-gated built-ins)
+    give the cube a **Face Helper**: an Input Number covering 0-6 (step 1) that the
+    blueprint updates on every flip / tap / slide and reads on rotate. A twist that starts
+    within a few milliseconds of a flip may still see the previous face. Faces are
+    numbered 1-6; to learn which is which, open Developer Tools > Events, listen to
+    `zha_event`, flip the cube and read `args.activated_face` (the Logbook only says
+    "face_any").
+
+
+    Every action can use these variables: `cube_action` (shake / tap / slide / flip /
+    rotate_left / rotate_right / throw), `cube_face` (1-6, or 0 when the gesture has no
+    face), `cube_from_face` (Flip 90° only), `cube_flip_degrees` (90 / 180),
+    `cube_rotate_degrees` (signed, negative = left), `cube_description`.
+
+
+    Optional built-in "Rotate to Dim": pick one or more lights and a percent-per-quarter-turn
+    and rotation dims them up/down with no custom actions needed (right = brighter). Each
+    light is stepped independently; rotating right also turns an off light on, and dimming
+    down past 0% turns it off. Both built-ins can be limited to one face ("Only on face").
+
+
+    Optional built-in "Rotate to Cycle Scenes": give it an ordered scene list and each
+    twist steps to the next (right) or previous (left) scene. The "current" scene is
+    whichever one in the list was activated most recently, so a flip or tap that recalls
+    a listed scene resyncs it. Do not enable both built-ins on the same face; with "Only
+    on face" set they can coexist on different faces.
+
+
+    Known ZHA quirk gaps on the T1 Pro: Throw, Hold and the one-minute-inactivity
+    events are not decoded, so the Throw action only fires on the older cube.
+    Requires HA 2024.10+.
+  domain: automation
+  homeassistant:
+    min_version: "2024.10.0"
+  input:
+    cube_device:
+      name: Aqara Cube
+      description: "The cube device (ZHA)."
+      selector:
+        device:
+          filter:
+            - integration: zha
+              manufacturer: LUMI
+              model: lumi.remote.cagl02
+            - integration: zha
+              manufacturer: LUMI
+              model: lumi.sensor_cube.aqgl01
+            - integration: zha
+              manufacturer: LUMI
+              model: lumi.sensor_cube
+
+    face_helper:
+      name: Face Helper (optional)
+      description: >-
+        A dedicated Input Number that accepts every value 0-6 (min 0, max 6, step 1). It
+        remembers which face is on top; required for per-face rotate actions and for
+        "Only on face" on the built-ins. A helper whose range does not cover 0-6 is
+        left untouched (the face is then not tracked).
+      default: ""
+      selector:
+        entity:
+          filter:
+            - domain: input_number
+
+    gestures:
+      name: Gestures
+      description: >-
+        One action list per gesture. Leave anything you do not need empty.
+      input:
+        shake_action:
+          name: Shake
+          default: []
+          selector:
+            action: {}
+        tap_action:
+          name: Tap (any face)
+          description: "Knock the cube twice on the table. Runs in addition to any per-face tap action."
+          default: []
+          selector:
+            action: {}
+        slide_action:
+          name: Slide (any face)
+          description: "Push the cube across the table. Runs in addition to any per-face slide action."
+          default: []
+          selector:
+            action: {}
+        flip_action:
+          name: Flip (any)
+          description: "Runs on every flip, 90° or 180°, before the degree-specific and per-face flip actions."
+          default: []
+          selector:
+            action: {}
+        flip_90_action:
+          name: Flip 90°
+          description: "Runs in addition to any per-face flip action."
+          default: []
+          selector:
+            action: {}
+        flip_180_action:
+          name: Flip 180°
+          description: "Runs in addition to any per-face flip action."
+          default: []
+          selector:
+            action: {}
+        rotate_left_action:
+          name: Rotate Left
+          description: "`cube_rotate_degrees` is the (negative) angle. Also runs the built-in Dim / Cycle Scenes."
+          default: []
+          selector:
+            action: {}
+        rotate_right_action:
+          name: Rotate Right
+          description: "`cube_rotate_degrees` is the (positive) angle. Also runs the built-in Dim / Cycle Scenes."
+          default: []
+          selector:
+            action: {}
+        throw_action:
+          name: Throw
+          description: "Older cube only - the ZHA quirk does not decode the T1 Pro throw."
+          default: []
+          selector:
+            action: {}
+
+    rotate_dimming:
+      name: Rotate to Dim (optional)
+      description: >-
+        Built-in dimming so you do not have to write brightness math. Leave the light
+        empty to disable.
+      collapsed: true
+      input:
+        rotate_light:
+          name: Lights to dim
+          description: "One or more lights. Leave empty to disable."
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain: light
+        rotate_percent_per_quarter_turn:
+          name: Percent per quarter turn
+          description: "How much a 90° rotation changes brightness. Smaller = finer control."
+          default: 25
+          selector:
+            number:
+              min: 5
+              max: 100
+              step: 5
+              unit_of_measurement: "%"
+              mode: slider
+        rotate_light_face:
+          name: Only on face
+          description: "0 = any face. 1-6 needs the Face Helper."
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 6
+              step: 1
+              mode: box
+
+    rotate_scenes:
+      name: Rotate to Cycle Scenes (optional)
+      description: >-
+        Rotate right = next scene in the list, rotate left = previous. Leave the list
+        empty to disable. Order it dim-to-bright so "right" still means more light.
+        Scenes that are unavailable or deleted are skipped. Twists faster than about
+        one second apart may reach the lights out of order (best effort).
+      collapsed: true
+      input:
+        rotate_scene_list:
+          name: Scenes, in order
+          description: "Two or more scenes. Rotate right moves down this list, left moves up."
+          default: []
+          selector:
+            entity:
+              multiple: true
+              reorder: true
+              filter:
+                - domain: scene
+        rotate_scene_degrees_per_step:
+          name: Degrees per step
+          description: >-
+            Twists under 10° are ignored as jitter. Otherwise a twist always moves at least
+            one step; larger twists move one step per this many degrees (rounded to the
+            nearest step, so 90° with a 60° setting is two steps).
+          default: 60
+          selector:
+            number:
+              min: 15
+              max: 180
+              step: 5
+              unit_of_measurement: "°"
+              mode: slider
+        rotate_scene_wrap:
+          name: Wrap around
+          description: "Off: stop at the ends of the list. On: continue from the other end."
+          default: false
+          selector:
+            boolean: {}
+        rotate_scene_face:
+          name: Only on face
+          description: "0 = any face. 1-6 needs the Face Helper."
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 6
+              step: 1
+              mode: box
+
+    face_1:
+      name: Face 1 (optional)
+      description: "Actions while face 1 is on top. Flip = runs when a flip lands on face 1."
+      collapsed: true
+      input:
+        face_1_tap:
+          name: Face 1 - Tap
+          default: []
+          selector:
+            action: {}
+        face_1_slide:
+          name: Face 1 - Slide
+          default: []
+          selector:
+            action: {}
+        face_1_rotate_left:
+          name: Face 1 - Rotate Left
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_1_rotate_right:
+          name: Face 1 - Rotate Right
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_1_flip:
+          name: Face 1 - Flip lands here
+          default: []
+          selector:
+            action: {}
+
+    face_2:
+      name: Face 2 (optional)
+      description: "Actions while face 2 is on top. Flip = runs when a flip lands on face 2."
+      collapsed: true
+      input:
+        face_2_tap:
+          name: Face 2 - Tap
+          default: []
+          selector:
+            action: {}
+        face_2_slide:
+          name: Face 2 - Slide
+          default: []
+          selector:
+            action: {}
+        face_2_rotate_left:
+          name: Face 2 - Rotate Left
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_2_rotate_right:
+          name: Face 2 - Rotate Right
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_2_flip:
+          name: Face 2 - Flip lands here
+          default: []
+          selector:
+            action: {}
+
+    face_3:
+      name: Face 3 (optional)
+      description: "Actions while face 3 is on top. Flip = runs when a flip lands on face 3."
+      collapsed: true
+      input:
+        face_3_tap:
+          name: Face 3 - Tap
+          default: []
+          selector:
+            action: {}
+        face_3_slide:
+          name: Face 3 - Slide
+          default: []
+          selector:
+            action: {}
+        face_3_rotate_left:
+          name: Face 3 - Rotate Left
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_3_rotate_right:
+          name: Face 3 - Rotate Right
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_3_flip:
+          name: Face 3 - Flip lands here
+          default: []
+          selector:
+            action: {}
+
+    face_4:
+      name: Face 4 (optional)
+      description: "Actions while face 4 is on top. Flip = runs when a flip lands on face 4."
+      collapsed: true
+      input:
+        face_4_tap:
+          name: Face 4 - Tap
+          default: []
+          selector:
+            action: {}
+        face_4_slide:
+          name: Face 4 - Slide
+          default: []
+          selector:
+            action: {}
+        face_4_rotate_left:
+          name: Face 4 - Rotate Left
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_4_rotate_right:
+          name: Face 4 - Rotate Right
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_4_flip:
+          name: Face 4 - Flip lands here
+          default: []
+          selector:
+            action: {}
+
+    face_5:
+      name: Face 5 (optional)
+      description: "Actions while face 5 is on top. Flip = runs when a flip lands on face 5."
+      collapsed: true
+      input:
+        face_5_tap:
+          name: Face 5 - Tap
+          default: []
+          selector:
+            action: {}
+        face_5_slide:
+          name: Face 5 - Slide
+          default: []
+          selector:
+            action: {}
+        face_5_rotate_left:
+          name: Face 5 - Rotate Left
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_5_rotate_right:
+          name: Face 5 - Rotate Right
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_5_flip:
+          name: Face 5 - Flip lands here
+          default: []
+          selector:
+            action: {}
+
+    face_6:
+      name: Face 6 (optional)
+      description: "Actions while face 6 is on top. Flip = runs when a flip lands on face 6."
+      collapsed: true
+      input:
+        face_6_tap:
+          name: Face 6 - Tap
+          default: []
+          selector:
+            action: {}
+        face_6_slide:
+          name: Face 6 - Slide
+          default: []
+          selector:
+            action: {}
+        face_6_rotate_left:
+          name: Face 6 - Rotate Left
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_6_rotate_right:
+          name: Face 6 - Rotate Right
+          description: "Needs the Face Helper."
+          default: []
+          selector:
+            action: {}
+        face_6_flip:
+          name: Face 6 - Flip lands here
+          default: []
+          selector:
+            action: {}
+
+# Parallel so a flip right after a tap is not blocked by a still-running action.
+# A very fast rotate burst can overlap its own dim steps (relative steps, so the
+# net result is close but not exact); beyond 10 concurrent runs extras are
+# dropped silently.
+mode: parallel
+max: 10
+max_exceeded: silent
+
+triggers:
+  - trigger: event
+    event_type: zha_event
+    event_data:
+      device_id: !input cube_device
+
+actions:
+  - variables:
+      face_helper: !input face_helper
+      rotate_light: !input rotate_light
+      rotate_pct: !input rotate_percent_per_quarter_turn
+      rotate_light_face: !input rotate_light_face
+      rotate_scene_face: !input rotate_scene_face
+      rotate_scenes: !input rotate_scene_list
+      rotate_scene_step: !input rotate_scene_degrees_per_step
+      rotate_scene_wrap: !input rotate_scene_wrap
+      # The ZHA quirk names knock/drop; expose friendlier names to user actions.
+      cube_action: >-
+        {% set c = trigger.event.data.command | default('') %}
+        {{ {'knock': 'tap', 'drop': 'throw'}.get(c, c) }}
+      cube_args: >-
+        {% set a = trigger.event.data.args | default({}) %}
+        {{ a if a is mapping else {} }}
+      # Tap/slide/flip carry the face; rotate does not, so fall back to the Face Helper.
+      cube_face: >-
+        {% set f = cube_args.get('activated_face', 0) | int(0) %}
+        {% if f == 0 and cube_action in ['rotate_left', 'rotate_right']
+              and face_helper is string and face_helper | length > 0 %}
+          {{ states(face_helper) | int(0) }}
+        {% else %}
+          {{ f }}
+        {% endif %}
+      cube_from_face: "{{ cube_args.get('deactivated_face', 0) | int(0) }}"
+      cube_flip_degrees: "{{ cube_args.get('flip_degrees', 0) | int(0) }}"
+      cube_rotate_degrees: "{{ cube_args.get('relative_degrees', 0) | float(0) | round(1) }}"
+      cube_description: "{{ cube_args.get('description', '') }}"
+      # Private copies used for routing below, so a Variables step inside a
+      # user action cannot re-route the per-face or dimming stages.
+      _cube_action: "{{ cube_action }}"
+      _cube_face: "{{ cube_face }}"
+      _cube_flip_degrees: "{{ cube_flip_degrees }}"
+      _cube_rotate_degrees: "{{ cube_rotate_degrees }}"
+      _rotate_light: "{{ rotate_light }}"
+      _rotate_pct: "{{ rotate_pct }}"
+      _face_helper: "{{ face_helper if face_helper is string else '' }}"
+      _rotate_light_face: "{{ rotate_light_face | int(0) }}"
+      _rotate_scene_face: "{{ rotate_scene_face | int(0) }}"
+      # Normalize a scalar to a list, drop deleted/unavailable scenes so a broken
+      # entry can never pin the cycle (never-activated scenes are 'unknown' and kept).
+      _rotate_scenes: >-
+        {% set src = [rotate_scenes] if rotate_scenes is string else rotate_scenes %}
+        {% set ns = namespace(keep=[]) %}
+        {% for s in src %}
+          {% if expand([s]) | length > 0 and states(s) != 'unavailable' %}
+            {% set ns.keep = ns.keep + [s] %}
+          {% endif %}
+        {% endfor %}
+        {{ ns.keep }}
+      _rotate_scene_step: "{{ rotate_scene_step }}"
+      _rotate_scene_wrap: "{{ rotate_scene_wrap }}"
+
+  # 0. Remember which face is on top (flip / tap / slide report it)
+  - if:
+      - condition: template
+        value_template: >-
+          {{ _face_helper | length > 0 and _cube_face > 0
+             and _cube_action in ['flip', 'tap', 'slide']
+             and (state_attr(_face_helper, 'min') | float(1)) <= 0
+             and (state_attr(_face_helper, 'max') | float(0)) >= 6
+             and states(_face_helper) | int(-1) != _cube_face }}
+    then:
+      - action: input_number.set_value
+        target:
+          entity_id: "{{ _face_helper }}"
+        data:
+          value: "{{ _cube_face }}"
+
+  # 1. Gesture-level actions
+  - choose:
+      - conditions: "{{ _cube_action == 'shake' }}"
+        sequence: !input shake_action
+      - conditions: "{{ _cube_action == 'tap' }}"
+        sequence: !input tap_action
+      - conditions: "{{ _cube_action == 'slide' }}"
+        sequence: !input slide_action
+      - conditions: "{{ _cube_action == 'flip' }}"
+        sequence:
+          - sequence: !input flip_action
+          - choose:
+              - conditions: "{{ _cube_flip_degrees == 90 }}"
+                sequence: !input flip_90_action
+              - conditions: "{{ _cube_flip_degrees == 180 }}"
+                sequence: !input flip_180_action
+      - conditions: "{{ _cube_action == 'rotate_left' }}"
+        sequence: !input rotate_left_action
+      - conditions: "{{ _cube_action == 'rotate_right' }}"
+        sequence: !input rotate_right_action
+      - conditions: "{{ _cube_action == 'throw' }}"
+        sequence: !input throw_action
+
+  # 2. Per-face actions (run after the gesture-level action)
+  - choose:
+      - conditions: "{{ _cube_action == 'tap' and _cube_face == 1 }}"
+        sequence: !input face_1_tap
+      - conditions: "{{ _cube_action == 'slide' and _cube_face == 1 }}"
+        sequence: !input face_1_slide
+      - conditions: "{{ _cube_action == 'rotate_left' and _cube_face == 1 }}"
+        sequence: !input face_1_rotate_left
+      - conditions: "{{ _cube_action == 'rotate_right' and _cube_face == 1 }}"
+        sequence: !input face_1_rotate_right
+      - conditions: "{{ _cube_action == 'flip' and _cube_face == 1 }}"
+        sequence: !input face_1_flip
+      - conditions: "{{ _cube_action == 'tap' and _cube_face == 2 }}"
+        sequence: !input face_2_tap
+      - conditions: "{{ _cube_action == 'slide' and _cube_face == 2 }}"
+        sequence: !input face_2_slide
+      - conditions: "{{ _cube_action == 'rotate_left' and _cube_face == 2 }}"
+        sequence: !input face_2_rotate_left
+      - conditions: "{{ _cube_action == 'rotate_right' and _cube_face == 2 }}"
+        sequence: !input face_2_rotate_right
+      - conditions: "{{ _cube_action == 'flip' and _cube_face == 2 }}"
+        sequence: !input face_2_flip
+      - conditions: "{{ _cube_action == 'tap' and _cube_face == 3 }}"
+        sequence: !input face_3_tap
+      - conditions: "{{ _cube_action == 'slide' and _cube_face == 3 }}"
+        sequence: !input face_3_slide
+      - conditions: "{{ _cube_action == 'rotate_left' and _cube_face == 3 }}"
+        sequence: !input face_3_rotate_left
+      - conditions: "{{ _cube_action == 'rotate_right' and _cube_face == 3 }}"
+        sequence: !input face_3_rotate_right
+      - conditions: "{{ _cube_action == 'flip' and _cube_face == 3 }}"
+        sequence: !input face_3_flip
+      - conditions: "{{ _cube_action == 'tap' and _cube_face == 4 }}"
+        sequence: !input face_4_tap
+      - conditions: "{{ _cube_action == 'slide' and _cube_face == 4 }}"
+        sequence: !input face_4_slide
+      - conditions: "{{ _cube_action == 'rotate_left' and _cube_face == 4 }}"
+        sequence: !input face_4_rotate_left
+      - conditions: "{{ _cube_action == 'rotate_right' and _cube_face == 4 }}"
+        sequence: !input face_4_rotate_right
+      - conditions: "{{ _cube_action == 'flip' and _cube_face == 4 }}"
+        sequence: !input face_4_flip
+      - conditions: "{{ _cube_action == 'tap' and _cube_face == 5 }}"
+        sequence: !input face_5_tap
+      - conditions: "{{ _cube_action == 'slide' and _cube_face == 5 }}"
+        sequence: !input face_5_slide
+      - conditions: "{{ _cube_action == 'rotate_left' and _cube_face == 5 }}"
+        sequence: !input face_5_rotate_left
+      - conditions: "{{ _cube_action == 'rotate_right' and _cube_face == 5 }}"
+        sequence: !input face_5_rotate_right
+      - conditions: "{{ _cube_action == 'flip' and _cube_face == 5 }}"
+        sequence: !input face_5_flip
+      - conditions: "{{ _cube_action == 'tap' and _cube_face == 6 }}"
+        sequence: !input face_6_tap
+      - conditions: "{{ _cube_action == 'slide' and _cube_face == 6 }}"
+        sequence: !input face_6_slide
+      - conditions: "{{ _cube_action == 'rotate_left' and _cube_face == 6 }}"
+        sequence: !input face_6_rotate_left
+      - conditions: "{{ _cube_action == 'rotate_right' and _cube_face == 6 }}"
+        sequence: !input face_6_rotate_right
+      - conditions: "{{ _cube_action == 'flip' and _cube_face == 6 }}"
+        sequence: !input face_6_flip
+
+  # 3. Built-in rotate-to-dim
+  - if:
+      - condition: template
+        value_template: >-
+          {{ _cube_action in ['rotate_left', 'rotate_right'] and _rotate_light | length > 0
+             and (_rotate_light_face == 0 or _cube_face == _rotate_light_face) }}
+    then:
+      - variables:
+          # Scale the reported angle to a brightness step; never round a real
+          # rotation down to nothing, and clamp to +/-100.
+          dim_step: >-
+            {% set raw = (_cube_rotate_degrees / 90 * _rotate_pct) | round(0) | int %}
+            {% if raw == 0 %}
+              {{ 1 if _cube_rotate_degrees > 0 else -1 }}
+            {% else %}
+              {{ [[raw, -100] | max, 100] | min }}
+            {% endif %}
+          dim_lights_on: >-
+            {{ expand(_rotate_light) | selectattr('state', 'eq', 'on') | list | count > 0 }}
+      - choose:
+          - conditions: "{{ dim_lights_on }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: !input rotate_light
+                data:
+                  brightness_step_pct: "{{ dim_step }}"
+          - conditions: "{{ dim_step > 0 }}"
+            sequence:
+              - action: light.turn_on
+                target:
+                  entity_id: !input rotate_light
+                data:
+                  brightness_pct: "{{ dim_step }}"
+
+  # 4. Built-in rotate-to-cycle-scenes
+  - if:
+      - condition: template
+        value_template: >-
+          {{ _cube_action in ['rotate_left', 'rotate_right']
+             and _rotate_scenes | length > 1
+             and (_rotate_scene_face == 0 or _cube_face == _rotate_scene_face)
+             and (_cube_rotate_degrees | abs) >= 10 }}
+    then:
+      - variables:
+          scene_count: "{{ _rotate_scenes | length }}"
+          scene_steps: "{{ [1, ((_cube_rotate_degrees | abs) / _rotate_scene_step) | round(0) | int] | max }}"
+          scene_dir: "{{ 1 if _cube_action == 'rotate_right' else -1 }}"
+          # Index of the most recently activated scene in the list (-1 if none ever was).
+          # A scene entity's state is its last-activation timestamp.
+          scene_current: >-
+            {% set ns = namespace(idx=-1, best=0) %}
+            {% for s in _rotate_scenes %}
+              {% set ts = as_timestamp(states(s), 0) %}
+              {% if ts > ns.best %}
+                {% set ns.best = ts %}{% set ns.idx = loop.index0 %}
+              {% endif %}
+            {% endfor %}
+            {{ ns.idx }}
+          scene_target: >-
+            {% if scene_current < 0 %}
+              {{ 0 if scene_dir > 0 else scene_count - 1 }}
+            {% else %}
+              {% set raw = scene_current + scene_dir * scene_steps %}
+              {% if _rotate_scene_wrap %}
+                {{ raw % scene_count }}
+              {% else %}
+                {{ [[raw, 0] | max, scene_count - 1] | min }}
+              {% endif %}
+            {% endif %}
+      - condition: template
+        value_template: "{{ scene_target != scene_current }}"
+      - action: scene.turn_on
+        target:
+          entity_id: "{{ _rotate_scenes[scene_target] }}"

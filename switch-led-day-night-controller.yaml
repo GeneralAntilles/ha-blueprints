@@ -1,0 +1,819 @@
+---
+blueprint:
+  name: Switch LED Day/Night Controller
+  description: >-
+    Drives the status/indicator LEDs of wall switches to different
+    settings by day vs night, so a bedroom goes dark at night without
+    giving up the locator glow during the day.
+
+
+    Day/night comes from a time-of-day sensor (e.g.
+    sensor.scene_by_time_of_day) whose state is matched against the
+    Night Bands list, and/or any on-off style entity (schedule helper,
+    input_boolean, binary sensor, or sun.sun - below_horizon counts as
+    night). If either source says night, it is night. If any
+    configured source has no data (unknown/unavailable), the
+    automation holds the current LED state rather than guessing - a
+    time-of-day sensor blipping out at 3am must not hand the
+    decision to a second source that says day.
+
+
+    Supported brands get their own section - pick the devices and a
+    day and a night behavior; entities and parameter numbers are
+    resolved automatically per device model:
+
+
+    Inovelli Blue (Zigbee via ZHA, VZM31/VZM35): LED bar intensity
+    while the load is on and while it is off, per phase. Writes are
+    idempotent - skipped when the device already holds the target -
+    so restarts and repeated band changes cost nothing. A device that
+    was offline during a transition converges on the next band
+    change, HA start or manual run.
+
+
+    GE/Jasco family (Z-Wave, including Enbrighten/UltraPro labels):
+    the LED Indicator parameter, resolved per verified model
+    (14294 / ZW3005, 14280 / ZW3107, 12719 / ZW4101). Parameter 3
+    means very different things on other GE models - Operation Mode
+    on Jasco motion switches, inverted LED options on some fan
+    controls - so unverified models are skipped with a warning,
+    never guessed at. For those, enable the model's LED Indicator
+    config entity (Z-Wave JS creates it disabled by default) and use
+    an Other Devices row instead.
+
+
+    HomeSeer (Z-Wave, HS-FC200+/HS-WD200+/HS-WS200+/HS-WX300): Normal
+    mode or Status mode via parameter 13, detected per model. In Status
+    mode every LED stays dark unless a status color is set (status
+    colors, params 21-27, are never touched). The load-off locator LED
+    (param 3) is also never touched. Unsupported HomeSeer models are
+    skipped with a warning in the system log.
+
+
+    Z-Wave parameters cannot be read back from a template, so those
+    writes are blind and run only on a real day/night transition, at
+    HA start and on manual runs. Liveness is fail-closed: a node is
+    written only when its node-status sensor reports alive, awake or
+    asleep - dead nodes, deleted devices and a Z-Wave stack still
+    loading are all skipped, and converge on the next transition or
+    restart.
+
+
+    Other Devices (advanced) keeps two generic escape hatches: rows
+    of {entity, day, night} for any number/select/switch/
+    input_boolean entity (idempotent, like the Inovelli path; switch
+    values may be on/off, true/false, 1/0 or yes/no in any case,
+    anything else is ignored). Rows pointing at a device already
+    listed in the Inovelli section are ignored - two paths writing
+    the same entity with different values would fight forever. Also
+    rows of
+    {entity, parameter, day, night} written via
+    zwave_js.set_config_parameter for anything else - e.g. Zooz LED
+    Indicator is parameter 2 on ZEN7x. Leave a day or night value
+    empty (or pick Leave Unchanged) to leave that device alone in
+    that phase.
+
+
+    Flash wear from twice-a-day writes is a non-issue - these
+    settings live in wear-leveled NVM rated for orders of magnitude
+    more cycles than decades of this - and the idempotent paths skip
+    no-op writes anyway.
+  domain: automation
+  homeassistant:
+    min_version: 2024.10.0
+  input:
+    source:
+      name: Day/Night Source
+      icon: mdi:theme-light-dark
+      input:
+        time_of_day_entity:
+          name: Time-of-Day Sensor
+          description: >-
+            Sensor or input_select naming the current time slot (e.g.
+            sensor.scene_by_time_of_day). Pick one - the list form is
+            only so the blueprint still loads when you leave it empty
+            and use the on/off entity below instead.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - sensor
+                    - input_select
+        night_bands:
+          name: Night Bands
+          description: >-
+            States of that sensor that count as night
+          default:
+            - night
+            - late-night
+          selector:
+            select:
+              options:
+                - early-morning
+                - morning
+                - day
+                - afternoon
+                - evening
+                - night
+                - late-night
+              multiple: true
+              custom_value: true
+        night_entity:
+          name: Night On/Off Entity
+          description: >-
+            Alternative or additional source - a schedule helper,
+            input_boolean, binary sensor or sun.sun whose on (or
+            below_horizon) state counts as night. Pick one; the list
+            form is only so the blueprint loads when it is empty.
+          default: []
+          selector:
+            entity:
+              multiple: true
+              filter:
+                - domain:
+                    - schedule
+                    - input_boolean
+                    - binary_sensor
+                    - sun
+    inovelli:
+      name: Inovelli Blue (Zigbee)
+      icon: mdi:led-strip-variant
+      input:
+        inovelli_devices:
+          name: Inovelli Devices
+          description: >-
+            Blue-series switches on ZHA. Their LED bar intensity
+            entities are found automatically; all devices here share
+            the four levels below (one instance per room if rooms
+            should differ).
+          default: []
+          selector:
+            device:
+              multiple: true
+              filter:
+                - integration: zha
+                  manufacturer: Inovelli
+        inovelli_day_on:
+          name: Day - LED Intensity While Load Is On
+          default: 15
+          selector:
+            number:
+              min: 0
+              max: 100
+        inovelli_day_off:
+          name: Day - LED Intensity While Load Is Off
+          default: 1
+          selector:
+            number:
+              min: 0
+              max: 100
+        inovelli_night_on:
+          name: Night - LED Intensity While Load Is On
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 100
+        inovelli_night_off:
+          name: Night - LED Intensity While Load Is Off
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 100
+    ge:
+      name: GE / Jasco (Z-Wave)
+      icon: mdi:lightbulb-outline
+      collapsed: true
+      input:
+        ge_devices:
+          name: GE Devices
+          description: >-
+            GE/Jasco-family Z-Wave switches, dimmers and plug-in
+            modules. The LED Indicator parameter is resolved per
+            verified model (14294 / ZW3005, 14280 / ZW3107,
+            12719 / ZW4101); other models are skipped with a warning
+            because parameter 3 is not an LED setting on every GE
+            device. For those, enable the LED Indicator config
+            entity (disabled by default) and use an Other Devices
+            row.
+          default: []
+          selector:
+            device:
+              multiple: true
+              filter:
+                - integration: zwave_js
+                  manufacturer: GE
+                - integration: zwave_js
+                  manufacturer: Jasco
+                - integration: zwave_js
+                  manufacturer: Enbrighten
+                - integration: zwave_js
+                  manufacturer: GE/Enbrighten
+                - integration: zwave_js
+                  manufacturer: UltraPro
+                - integration: zwave_js
+                  manufacturer: Ultrapro
+                - integration: zwave_js
+                  manufacturer: AT&T
+        ge_day_mode:
+          name: Day - LED Mode
+          default: "0"
+          selector:
+            select:
+              options:
+                - label: LED on when load is off (locator)
+                  value: "0"
+                - label: LED on when load is on
+                  value: "1"
+                - label: LED always off
+                  value: "2"
+                - label: Leave unchanged
+                  value: "skip"
+        ge_night_mode:
+          name: Night - LED Mode
+          default: "2"
+          selector:
+            select:
+              options:
+                - label: LED on when load is off (locator)
+                  value: "0"
+                - label: LED on when load is on
+                  value: "1"
+                - label: LED always off
+                  value: "2"
+                - label: Leave unchanged
+                  value: "skip"
+    homeseer:
+      name: HomeSeer (Z-Wave)
+      icon: mdi:dots-vertical
+      collapsed: true
+      input:
+        hs_devices:
+          name: HomeSeer Devices
+          description: >-
+            HS-FC200+, HS-WD200+, HS-WS200+ or HS-WX300. The
+            status-mode parameter (13) is detected per model; Status mode with no
+            status colors set means every LED is dark.
+          default: []
+          selector:
+            device:
+              multiple: true
+              filter:
+                - integration: zwave_js
+                  manufacturer: HomeSeer Technologies
+        hs_day_mode:
+          name: Day - LED Mode
+          default: "0"
+          selector:
+            select:
+              options:
+                - label: Normal (LEDs show load, locator per device)
+                  value: "0"
+                - label: Status mode (dark unless statuses are set)
+                  value: "1"
+                - label: Leave unchanged
+                  value: "skip"
+        hs_night_mode:
+          name: Night - LED Mode
+          default: "1"
+          selector:
+            select:
+              options:
+                - label: Normal (LEDs show load, locator per device)
+                  value: "0"
+                - label: Status mode (dark unless statuses are set)
+                  value: "1"
+                - label: Leave unchanged
+                  value: "skip"
+    other:
+      name: Other Devices (advanced)
+      icon: mdi:code-braces
+      collapsed: true
+      input:
+        led_settings:
+          name: LED Entities
+          description: >-
+            One row per LED setting entity (number, select, switch or
+            input_boolean), with the value it should hold by day and
+            by night. Example -
+
+            "- entity: number.some_switch_led_brightness
+
+            day: 15
+
+            night: 0"
+          default: []
+          selector:
+            object:
+        zwave_params:
+          name: Z-Wave Parameters
+          description: >-
+            One row per Z-Wave config parameter, for LEDs not exposed
+            as entities. Entity is any entity of that device (it only
+            addresses the node). Example -
+
+            "- entity: switch.zen76_switch
+
+            parameter: 2
+
+            day: 0
+
+            night: 2"
+          default: []
+          selector:
+            object:
+    extra:
+      name: Extra Actions (optional)
+      icon: mdi:script-text-outline
+      collapsed: true
+      input:
+        day_actions:
+          name: Day Actions
+          description: >-
+            Run when it becomes day (and at HA start during the day)
+          default: []
+          selector:
+            action: {}
+        night_actions:
+          name: Night Actions
+          description: >-
+            Run when it becomes night (and at HA start during the
+            night)
+          default: []
+          selector:
+            action: {}
+
+# Queued so an HA start racing a band change never interleaves two
+# convergence passes; both passes write the same targets, so order
+# does not matter, only that they do not overlap
+mode: queued
+max: 5
+max_exceeded: warning
+
+triggers:
+  # An empty entity list is a trigger that never fires, which is how
+  # each source stays optional. to: null matches every state-value
+  # change while ignoring attribute-only churn
+  - trigger: state
+    entity_id: !input time_of_day_entity
+    to: null
+  - trigger: state
+    entity_id: !input night_entity
+    to: null
+  - trigger: homeassistant
+    event: start
+
+variables:
+  time_of_day_entity: !input time_of_day_entity
+  night_bands: !input night_bands
+  night_entity_input: !input night_entity
+  inovelli_devices: !input inovelli_devices
+  inovelli_day_on: !input inovelli_day_on
+  inovelli_day_off: !input inovelli_day_off
+  inovelli_night_on: !input inovelli_night_on
+  inovelli_night_off: !input inovelli_night_off
+  ge_devices: !input ge_devices
+  ge_day_mode: !input ge_day_mode
+  ge_night_mode: !input ge_night_mode
+  hs_devices: !input hs_devices
+  hs_day_mode: !input hs_day_mode
+  hs_night_mode: !input hs_night_mode
+  led_settings: !input led_settings
+  zwave_params: !input zwave_params
+  night_on_states: ['on', 'below_horizon']
+  tod_entity: >-
+    {{ (time_of_day_entity | first) if time_of_day_entity | length > 0
+       else '' }}
+  ne_entity: >-
+    {{ (night_entity_input | first) if night_entity_input | length > 0
+       else '' }}
+  # A source that exists but has no data yet (restart) must not be
+  # read as "day" - better to keep last night's LED state for a few
+  # seconds than to light a dark bedroom at 3am
+  tod_valid: >-
+    {{ tod_entity != ''
+       and states(tod_entity) not in ['unknown', 'unavailable'] }}
+  ne_valid: >-
+    {{ ne_entity != ''
+       and states(ne_entity) not in ['unknown', 'unavailable'] }}
+  # Fail closed: every configured source must have data, not just
+  # one. A time-of-day sensor blipping unavailable must hold the
+  # current LED state, not hand the decision to a second source
+  # that says day
+  configured: >-
+    {{ (tod_valid or ne_valid)
+       and (tod_entity == '' or tod_valid)
+       and (ne_entity == '' or ne_valid) }}
+  is_night: >-
+    {{ (tod_valid and states(tod_entity) in night_bands)
+       or (ne_valid and states(ne_entity) in night_on_states) }}
+  # True on HA start and manual runs, and on state changes that
+  # actually cross the day/night boundary. Gates the blind Z-Wave
+  # writes and the extra actions; the idempotent paths self-gate by
+  # comparing values instead. A source recovering from unknown takes
+  # the old phase from the OTHER source when that one has data, so a
+  # blip does not replay night actions; only a sole source
+  # recovering forces a full converge (that is how the post-restart
+  # unknown -> band change catches up after the start run held)
+  phase_changed: >-
+    {% if trigger is not defined
+          or (trigger.platform | default('')) != 'state' %}
+      {{ true }}
+    {% else %}
+      {% set e = trigger.entity_id %}
+      {% set old = trigger.from_state.state
+         if trigger.from_state is not none else 'unknown' %}
+      {% set tod_now = tod_valid
+         and states(tod_entity) in night_bands %}
+      {% set ne_now = ne_valid
+         and states(ne_entity) in night_on_states %}
+      {% if old in ['unknown', 'unavailable'] %}
+        {% if (ne_valid if e == tod_entity else tod_valid) %}
+          {{ (ne_now if e == tod_entity else tod_now) != is_night }}
+        {% else %}
+          {{ true }}
+        {% endif %}
+      {% else %}
+        {% set old_tod = (old in night_bands)
+           if e == tod_entity else tod_now %}
+        {% set old_ne = (old in night_on_states)
+           if e == ne_entity else ne_now %}
+        {{ (old_tod or old_ne) != is_night }}
+      {% endif %}
+    {% endif %}
+  led_list: >-
+    {% set raw = led_settings
+       if led_settings is sequence and led_settings is not string
+          and led_settings is not mapping else [] %}
+    {{ raw | selectattr('entity', 'defined') | list }}
+  zwave_list: >-
+    {% set raw = zwave_params
+       if zwave_params is sequence and zwave_params is not string
+          and zwave_params is not mapping else [] %}
+    {{ raw | selectattr('entity', 'defined') | list }}
+
+actions:
+  - if:
+      - condition: template
+        value_template: "{{ not configured }}"
+    then:
+      - stop: >-
+          No day/night source has data - set a time-of-day sensor or
+          an on/off entity
+
+  # ================================================================
+  # INOVELLI BLUE (ZHA) - the LED bar intensity number entities are
+  # resolved from each device; idempotent like the generic entity
+  # path, so this runs on every trigger and self-heals
+  # ================================================================
+  - repeat:
+      for_each: "{{ inovelli_devices }}"
+      sequence:
+        - variables:
+            # Anchored so nothing but the intensity entity (plus an
+            # HA collision suffix) can match, and only a SINGLE
+            # match counts - ambiguity means skip, not guess
+            inv_on_matches: >-
+              {{ device_entities(repeat.item)
+                 | select('search', '^number\..*default_all_led'
+                          ~ '_on_intensity(_\d+)?$')
+                 | list }}
+            inv_off_matches: >-
+              {{ device_entities(repeat.item)
+                 | select('search', '^number\..*default_all_led'
+                          ~ '_off_intensity(_\d+)?$')
+                 | list }}
+            inv_on_entity: >-
+              {{ inv_on_matches | first
+                 if inv_on_matches | length == 1 else '' }}
+            inv_off_entity: >-
+              {{ inv_off_matches | first
+                 if inv_off_matches | length == 1 else '' }}
+            inv_on_target: >-
+              {{ inovelli_night_on if is_night else inovelli_day_on }}
+            inv_off_target: >-
+              {{ inovelli_night_off if is_night
+                 else inovelli_day_off }}
+        # A selected device that still exists but resolves to no (or
+        # ambiguous) LED entities would otherwise stop converging
+        # silently - e.g. after an entity rename
+        - if:
+            - condition: template
+              value_template: >-
+                {{ device_attr(repeat.item, 'id') is not none
+                   and (inv_on_entity == ''
+                        or inv_off_entity == '') }}
+          then:
+            - action: system_log.write
+              data:
+                level: warning
+                message: >-
+                  Switch LED Day/Night: could not resolve LED
+                  intensity entities for Inovelli device
+                  '{{ device_attr(repeat.item, "name_by_user")
+                      or device_attr(repeat.item, "name") }}'
+        - if:
+            - condition: template
+              value_template: >-
+                {{ inv_on_entity != ''
+                   and states(inv_on_entity) not in
+                       ['unknown', 'unavailable']
+                   and (not is_number(states(inv_on_entity))
+                        or states(inv_on_entity) | float
+                           != inv_on_target | float) }}
+          then:
+            - action: number.set_value
+              continue_on_error: true
+              target:
+                entity_id: "{{ inv_on_entity }}"
+              data:
+                value: "{{ inv_on_target }}"
+        - if:
+            - condition: template
+              value_template: >-
+                {{ inv_off_entity != ''
+                   and states(inv_off_entity) not in
+                       ['unknown', 'unavailable']
+                   and (not is_number(states(inv_off_entity))
+                        or states(inv_off_entity) | float
+                           != inv_off_target | float) }}
+          then:
+            - action: number.set_value
+              continue_on_error: true
+              target:
+                entity_id: "{{ inv_off_entity }}"
+              data:
+                value: "{{ inv_off_target }}"
+
+  # ================================================================
+  # GENERIC LED ENTITIES - idempotent: each row is written only when
+  # the entity is available and does not already hold the target
+  # ================================================================
+  - repeat:
+      for_each: "{{ led_list }}"
+      sequence:
+        - variables:
+            # entity must be a string and a value cell must not be
+            # null - jinja's default() only covers undefined, and an
+            # explicit blank/null cell means "leave this phase alone".
+            # A literal 0 or false must survive normalization
+            # A row whose entity belongs to a device the Inovelli
+            # section already owns is dropped - two paths writing
+            # the same entity with different values would trade
+            # writes forever, since each defeats the other's
+            # idempotence check
+            t_entity: >-
+              {% set e = repeat.item.entity
+                 if repeat.item.entity is defined
+                    and repeat.item.entity is string else '' %}
+              {{ '' if e != ''
+                    and device_id(e) in inovelli_devices else e }}
+            t_value: >-
+              {% set v = repeat.item.night if is_night
+                 else repeat.item.day %}
+              {{ '' if v is undefined or v is none else v }}
+            # 'on'/'off', or '' for anything unrecognized so a typo
+            # is a skip, not a turn-off
+            t_on_off: >-
+              {% set v = t_value | string | trim | lower %}
+              {{ 'on' if v in ['on', 'true', '1', 'yes']
+                 else ('off' if v in ['off', 'false', '0', 'no']
+                       else '') }}
+        - choose:
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {{ t_entity.startswith('number.')
+                       and is_number(t_value)
+                       and states(t_entity) not in
+                           ['unknown', 'unavailable']
+                       and (not is_number(states(t_entity))
+                            or states(t_entity) | float
+                               != t_value | float) }}
+              sequence:
+                - action: number.set_value
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ t_entity }}"
+                  data:
+                    value: "{{ t_value }}"
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {{ t_entity.startswith('select.')
+                       and t_value | string | trim != ''
+                       and states(t_entity) not in
+                           ['unknown', 'unavailable']
+                       and states(t_entity) != t_value | string }}
+              sequence:
+                - action: select.select_option
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ t_entity }}"
+                  data:
+                    option: "{{ t_value }}"
+            - conditions:
+                - condition: template
+                  value_template: >-
+                    {{ (t_entity.startswith('switch.')
+                        or t_entity.startswith('input_boolean.'))
+                       and t_on_off != ''
+                       and states(t_entity) not in
+                           ['unknown', 'unavailable']
+                       and states(t_entity) != t_on_off }}
+              sequence:
+                - if:
+                    - condition: template
+                      value_template: "{{ t_on_off == 'on' }}"
+                  then:
+                    - action: homeassistant.turn_on
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ t_entity }}"
+                  else:
+                    - action: homeassistant.turn_off
+                      continue_on_error: true
+                      target:
+                        entity_id: "{{ t_entity }}"
+
+  # ================================================================
+  # EXTRA ACTIONS - gated like the blind Z-Wave writes below, but
+  # deliberately run BEFORE them: a Z-Wave validation error is one
+  # of the few things continue_on_error cannot swallow, and it must
+  # never cost the user their own actions
+  # ================================================================
+  - if:
+      - condition: template
+        value_template: "{{ phase_changed }}"
+    then:
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ is_night }}"
+            sequence: !input night_actions
+        default: !input day_actions
+
+  # ================================================================
+  # BLIND Z-WAVE WRITES - no read-back is possible from a template,
+  # so only on real transitions, HA start and manual runs. Liveness
+  # is fail-closed: a node is written only when its node-status
+  # sensor resolves and reads alive/awake/asleep, because zwave_js
+  # rejects a deleted or not-yet-loaded target with vol.Invalid,
+  # which continue_on_error cannot swallow - it would abort every
+  # remaining write in this run
+  # ================================================================
+  - if:
+      - condition: template
+        value_template: "{{ phase_changed }}"
+    then:
+      # GE / JASCO FAMILY - LED Indicator parameter resolved per
+      # verified model; param 3 is NOT an LED setting on every GE
+      # model (Operation Mode on Jasco motion switches), so unknown
+      # models are skipped with a warning, never guessed
+      - repeat:
+          for_each: "{{ ge_devices }}"
+          sequence:
+            - variables:
+                ge_model: >-
+                  {{ device_attr(repeat.item, 'model')
+                     | default('', true) }}
+                ge_param: >-
+                  {{ {'14294 / ZW3005': 3, '14280 / ZW3107': 3,
+                      '12719 / ZW4101': 3}.get(ge_model, '') }}
+                ge_status_entity: >-
+                  {{ device_entities(repeat.item)
+                     | select('search',
+                              '^sensor\..*node_status(_\d+)?$')
+                     | list | first | default('') }}
+                ge_target: >-
+                  {{ ge_night_mode if is_night else ge_day_mode }}
+            - choose:
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ ge_target != 'skip'
+                           and device_attr(repeat.item, 'id')
+                               is not none
+                           and ge_param == '' }}
+                  sequence:
+                    - action: system_log.write
+                      data:
+                        level: warning
+                        message: >-
+                          Switch LED Day/Night: unverified GE/Jasco
+                          model '{{ ge_model }}' - device skipped
+                          (param 3 is not an LED setting on every
+                          model; use an Other Devices row instead)
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ ge_param != ''
+                           and ge_target != 'skip'
+                           and ge_status_entity != ''
+                           and states(ge_status_entity) in
+                               ['alive', 'awake', 'asleep'] }}
+                  sequence:
+                    - action: zwave_js.set_config_parameter
+                      continue_on_error: true
+                      target:
+                        device_id: "{{ repeat.item }}"
+                      data:
+                        parameter: "{{ ge_param }}"
+                        value: "{{ ge_target | int }}"
+
+      # HOMESEER - status mode enable/disable, parameter detected
+      # per model. Status colors (21-24) and the load-off locator
+      # LED (3) are deliberately never touched
+      - repeat:
+          for_each: "{{ hs_devices }}"
+          sequence:
+            - variables:
+                hs_model: >-
+                  {{ device_attr(repeat.item, 'model')
+                     | default('', true) }}
+                hs_param: >-
+                  {{ {'HS-FC200+': 13, 'HS-WD200+': 13,
+                      'HS-WS200+': 13, 'HS-WX300': 13}
+                     .get(hs_model, '') }}
+                hs_status_entity: >-
+                  {{ device_entities(repeat.item)
+                     | select('search',
+                              '^sensor\..*node_status(_\d+)?$')
+                     | list | first | default('') }}
+                hs_target: >-
+                  {{ hs_night_mode if is_night else hs_day_mode }}
+            # Warn only when a write was actually wanted and the
+            # device still exists - "Leave unchanged" and deleted
+            # devices stay quiet
+            - choose:
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ hs_target != 'skip'
+                           and device_attr(repeat.item, 'id')
+                               is not none
+                           and hs_param == '' }}
+                  sequence:
+                    - action: system_log.write
+                      data:
+                        level: warning
+                        message: >-
+                          Switch LED Day/Night: unsupported HomeSeer
+                          model '{{ hs_model }}' - device skipped
+                - conditions:
+                    - condition: template
+                      value_template: >-
+                        {{ hs_param != ''
+                           and hs_target != 'skip'
+                           and hs_status_entity != ''
+                           and states(hs_status_entity) in
+                               ['alive', 'awake', 'asleep'] }}
+                  sequence:
+                    - action: zwave_js.set_config_parameter
+                      continue_on_error: true
+                      target:
+                        device_id: "{{ repeat.item }}"
+                      data:
+                        parameter: "{{ hs_param }}"
+                        value: "{{ hs_target | int }}"
+
+      # GENERIC Z-WAVE PARAMETER ROWS. expand() of a nonexistent
+      # entity is empty, which is what catches typos - states()
+      # alone cannot tell a missing entity from a legit unknown
+      - repeat:
+          for_each: "{{ zwave_list }}"
+          sequence:
+            - variables:
+                z_entity: >-
+                  {{ repeat.item.entity
+                     if repeat.item.entity is defined
+                        and repeat.item.entity is string else '' }}
+                z_param: >-
+                  {{ repeat.item.parameter
+                     if repeat.item.parameter is defined
+                        and (repeat.item.parameter is string
+                             or repeat.item.parameter is number)
+                     else '' }}
+                z_value: >-
+                  {% set v = repeat.item.night if is_night
+                     else repeat.item.day %}
+                  {{ '' if v is undefined or v is none else v }}
+            - if:
+                - condition: template
+                  value_template: >-
+                    {{ z_entity != ''
+                       and z_param | string | trim != ''
+                       and z_value | string | trim != ''
+                       and expand([z_entity]) | length > 0
+                       and states(z_entity) != 'unavailable' }}
+              then:
+                - action: zwave_js.set_config_parameter
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ z_entity }}"
+                  data:
+                    parameter: "{{ z_param }}"
+                    value: "{{ z_value }}"
