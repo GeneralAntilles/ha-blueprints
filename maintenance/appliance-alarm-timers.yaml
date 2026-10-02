@@ -1,0 +1,90 @@
+# Persistent timers: no initial value, so HA restores state after restart.
+# 2000-01-01 is the inactive sentinel.
+chest_freezer_warm_last_alert:
+  name: Chest Freezer Warm Last Alert
+  has_date: true
+  has_time: true
+chest_freezer_recovered_since:
+  name: Chest Freezer Recovered Since
+  has_date: true
+  has_time: true
+chest_freezer_warm_since:
+  name: Chest Freezer Warm Since
+  has_date: true
+  has_time: true
+chest_freezer_no_power_since:
+  name: Chest Freezer No Power Since
+  has_date: true
+  has_time: true
+chest_freezer_no_power_last_alert:
+  name: Chest Freezer No Power Last Alert
+  has_date: true
+  has_time: true
+chest_freezer_compressor_idle_since:
+  name: Chest Freezer Compressor Idle Since
+  has_date: true
+  has_time: true
+chest_freezer_compressor_idle_last_alert:
+  name: Chest Freezer Compressor Idle Last Alert
+  has_date: true
+  has_time: true
+chest_freezer_sensor_lost_since:
+  name: Chest Freezer Sensor Lost Since
+  has_date: true
+  has_time: true
+chest_freezer_sensor_lost_last_alert:
+  name: Chest Freezer Sensor Lost Last Alert
+  has_date: true
+  has_time: true
+chest_freezer_plug_unavailable_since:
+  name: Chest Freezer Plug Unavailable Since
+  has_date: true
+  has_time: true
+chest_freezer_plug_unavailable_last_alert:
+  name: Chest Freezer Plug Unavailable Last Alert
+  has_date: true
+  has_time: true
+chest_freezer_plug_silent_last_alert:
+  name: Chest Freezer Plug Silent Last Alert
+  has_date: true
+  has_time: true
+kitchen_refrigerator_warm_last_alert:
+  name: Kitchen Refrigerator Warm Last Alert
+  has_date: true
+  has_time: true
+kitchen_refrigerator_recovered_since:
+  name: Kitchen Refrigerator Recovered Since
+  has_date: true
+  has_time: true
+kitchen_refrigerator_warm_since:
+  name: Kitchen Refrigerator Warm Since
+  has_date: true
+  has_time: true
+kitchen_refrigerator_no_power_since:
+  name: Kitchen Refrigerator No Power Since
+  has_date: true
+  has_time: true
+kitchen_refrigerator_no_power_last_alert:
+  name: Kitchen Refrigerator No Power Last Alert
+  has_date: true
+  has_time: true
+kitchen_refrigerator_sensor_lost_since:
+  name: Kitchen Refrigerator Sensor Lost Since
+  has_date: true
+  has_time: true
+kitchen_refrigerator_sensor_lost_last_alert:
+  name: Kitchen Refrigerator Sensor Lost Last Alert
+  has_date: true
+  has_time: true
+kitchen_refrigerator_plug_unavailable_since:
+  name: Kitchen Refrigerator Plug Unavailable Since
+  has_date: true
+  has_time: true
+kitchen_refrigerator_plug_unavailable_last_alert:
+  name: Kitchen Refrigerator Plug Unavailable Last Alert
+  has_date: true
+  has_time: true
+kitchen_refrigerator_plug_silent_last_alert:
+  name: Kitchen Refrigerator Plug Silent Last Alert
+  has_date: true
+  has_time: true

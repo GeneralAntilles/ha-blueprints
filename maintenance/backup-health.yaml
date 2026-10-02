@@ -1,0 +1,34 @@
+- id: system_backup_health
+  alias: 'System: Backup - Health Check'
+  description: Monitor managed local backups. NAS/off-machine destination deferred
+    until NAS is restored.
+  triggers:
+  - trigger: time_pattern
+    hours: /1
+  - trigger: state
+    entity_id: event.backup_automatic_backup
+    to: null
+  - trigger: homeassistant
+    event: start
+  actions:
+  - choose:
+    - conditions:
+      - condition: template
+        value_template: '{{ not has_value(''sensor.backup_last_successful_automatic_backup'')
+          or state_attr(''event.backup_automatic_backup'',''event_type'') == ''failed''
+          or (is_number(as_timestamp(states(''sensor.backup_last_successful_automatic_backup''),
+          none)) and as_timestamp(now()) - as_timestamp(states(''sensor.backup_last_successful_automatic_backup''))
+          > 36*3600) }}'
+      sequence:
+      - action: persistent_notification.create
+        data:
+          notification_id: backup_health
+          title: Home Assistant backup needs attention
+          message: The latest managed backup failed or the last successful backup
+            is over 36 hours old. Check Settings → System → Backups. Off-machine backup
+            is deferred until the NAS is available.
+    default:
+    - action: persistent_notification.dismiss
+      data:
+        notification_id: backup_health
+  mode: single

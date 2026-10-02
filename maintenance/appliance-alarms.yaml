@@ -1,0 +1,982 @@
+- id: safety_chest_freezer_temperature_alarm
+  alias: 'Safety: Chest Freezer - Temperature Alarm'
+  description: 'Normal is about -7 °F; 10 days of history (2026-08-24..09-03) never exceeded -3.5 °F.
+    Compressor cycle: off 4.2-5.0 h at 0 W, on 3.0-4.4 h at about 68 W; warms about +1.5 °F/h while off.
+    Thresholds: warm above 10 °F for 45 min; recovered below 0 °F; no power = thermometer above 0 °F while
+    the plug is under 1 W, for 20 min; compressor idle backstop = plug under 1 W for 8 h (normal off-phase
+    is 4.2-5.0 h). Latch: input_boolean.chest_freezer_temperature_alarm. Plug-silent check: no report
+    for 30 min via last_reported. Every alert goes to the phone (critical for warm/no-power) AND the HA
+    notification drawer (ids chest_freezer_alarm/_power/_sensor/_plug); drawer entries clear themselves
+    when the condition ends (recovered, power_back, sensor_back, plug_back). Persistent onset and notification
+    timestamps survive automation reloads and HA restarts. Re-evaluated each minute and on sensor changes.
+    Unknown readings preserve pending temperature/power timers; recovery requires valid readings. No physical
+    load control. Updated 2026-09-12.'
+  triggers:
+  - trigger: homeassistant
+    event: start
+  - trigger: event
+    event_type: automation_reloaded
+  - trigger: time_pattern
+    minutes: /1
+  - trigger: state
+    entity_id:
+    - sensor.chest_freezer_thermometer_temperature
+    - sensor.chest_freezer_power
+    to: null
+  conditions: []
+  actions:
+  - variables:
+      since_entity: input_datetime.chest_freezer_recovered_since
+      since_value: '{{ state_attr(''input_datetime.chest_freezer_recovered_since'',''timestamp'') | float(0)
+        }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.chest_freezer_thermometer_temperature'')) }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.chest_freezer_thermometer_temperature'') | float(99) < 0 }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_recovered_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 600) and (is_state(''input_boolean.chest_freezer_temperature_alarm'',''on'')) }}'
+        then:
+        - action: input_boolean.turn_off
+          target:
+            entity_id: input_boolean.chest_freezer_temperature_alarm
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: chest_freezer_alarm
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: ✅ Chest Freezer back to normal
+            message: Chest Freezer freezer is back at {{ states('sensor.chest_freezer_thermometer_temperature')
+              }} °F.
+            data:
+              tag: chest_freezer_alarm
+              group: appliance-safety
+          continue_on_error: true
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_warm_last_alert
+          data:
+            timestamp: 946684800
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_recovered_since
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.chest_freezer_warm_since
+      since_value: '{{ state_attr(''input_datetime.chest_freezer_warm_since'',''timestamp'') | float(0)
+        }}'
+      last_alert_value: '{{ state_attr(''input_datetime.chest_freezer_warm_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.chest_freezer_thermometer_temperature'')) }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.chest_freezer_thermometer_temperature'') | float(-99) > 10
+          }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_warm_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 2700) and (not is_state(''input_boolean.chest_freezer_temperature_alarm'',''on'')) }}'
+        then:
+        - action: input_boolean.turn_on
+          target:
+            entity_id: input_boolean.chest_freezer_temperature_alarm
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: 🧊 Chest Freezer warming up
+            message: Chest Freezer freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+              }} °F (alarm above 10 °F for 45 min). Plug drawing {{ states('sensor.chest_freezer_power')
+              }} W.
+            data:
+              tag: chest_freezer_alarm
+              group: appliance-safety
+              push:
+                sound:
+                  name: default
+                  critical: 1
+                  volume: 1.0
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: chest_freezer_alarm
+            title: Chest Freezer warming up
+            message: Chest Freezer freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+              }} °F (alarm above 10 °F for 45 min). Plug drawing {{ states('sensor.chest_freezer_power')
+              }} W.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_warm_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_warm_since
+          data:
+            timestamp: 946684800
+  - if:
+    - condition: template
+      value_template: '{{ is_state(''input_boolean.chest_freezer_temperature_alarm'',''on'') and as_timestamp(now())
+        - (state_attr(''input_datetime.chest_freezer_warm_last_alert'',''timestamp'') | float(0)) >= 3600
+        }}'
+    then:
+    - action: notify.mobile_app_iphone_13_pro
+      data:
+        title: 🧊 Chest Freezer still warm
+        message: Chest Freezer freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+          }} °F (alarm above 10 °F for 45 min). Plug drawing {{ states('sensor.chest_freezer_power') }}
+          W.
+        data:
+          tag: chest_freezer_alarm
+          group: appliance-safety
+          push:
+            sound:
+              name: default
+              critical: 1
+              volume: 1.0
+      continue_on_error: true
+    - action: persistent_notification.create
+      data:
+        notification_id: chest_freezer_alarm
+        title: Chest Freezer still warm
+        message: Chest Freezer freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+          }} °F (alarm above 10 °F for 45 min). Plug drawing {{ states('sensor.chest_freezer_power') }}
+          W.
+    - action: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.chest_freezer_warm_last_alert
+      data:
+        timestamp: '{{ as_timestamp(now()) | int }}'
+  - variables:
+      since_entity: input_datetime.chest_freezer_no_power_since
+      since_value: '{{ state_attr(''input_datetime.chest_freezer_no_power_since'',''timestamp'') | float(0)
+        }}'
+      last_alert_value: '{{ state_attr(''input_datetime.chest_freezer_no_power_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.chest_freezer_power'')) and is_number(states(''sensor.chest_freezer_thermometer_temperature''))
+        }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.chest_freezer_power'') | float(99) < 1 and states(''sensor.chest_freezer_thermometer_temperature'')
+          | float(-99) > 0 }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_no_power_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 1200) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: 🔌 Chest Freezer has no power
+            message: 'Chest Freezer reads {{ states(''sensor.chest_freezer_thermometer_temperature'')
+              }} °F, past its thermostat cut-in (about -3.5 °F), but the plug has drawn under 1 W for
+              20 min: the compressor is not running. Check the plug relay, the outlet, the breaker, and
+              the compressor.'
+            data:
+              tag: chest_freezer_power
+              group: appliance-safety
+              push:
+                sound:
+                  name: default
+                  critical: 1
+                  volume: 1.0
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: chest_freezer_power
+            title: Chest Freezer has no power
+            message: 'Chest Freezer reads {{ states(''sensor.chest_freezer_thermometer_temperature'')
+              }} °F, past its thermostat cut-in (about -3.5 °F), but the plug has drawn under 1 W for
+              20 min: the compressor is not running. Check the plug relay, the outlet, the breaker, and
+              the compressor.'
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_no_power_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_no_power_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (states(''sensor.chest_freezer_power'')
+            | float(0) >= 1) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: chest_freezer_power
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_no_power_last_alert
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.chest_freezer_compressor_idle_since
+      since_value: '{{ state_attr(''input_datetime.chest_freezer_compressor_idle_since'',''timestamp'')
+        | float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.chest_freezer_compressor_idle_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.chest_freezer_power'')) }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.chest_freezer_power'') | float(99) < 1 }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_compressor_idle_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 28800) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: Chest Freezer compressor idle
+            message: The Chest Freezer compressor has not run for 8 hours (normal is under 5). Freezer
+              reads {{ states('sensor.chest_freezer_thermometer_temperature') }} °F.
+            data:
+              tag: chest_freezer_power
+              group: appliance-safety
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: chest_freezer_power
+            title: Chest Freezer compressor idle
+            message: The Chest Freezer compressor has not run for 8 hours (normal is under 5). Freezer
+              reads {{ states('sensor.chest_freezer_thermometer_temperature') }} °F.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_compressor_idle_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_compressor_idle_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (true) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: chest_freezer_power
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_compressor_idle_last_alert
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.chest_freezer_sensor_lost_since
+      since_value: '{{ state_attr(''input_datetime.chest_freezer_sensor_lost_since'',''timestamp'') |
+        float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.chest_freezer_sensor_lost_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ true }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ not (is_number(states(''sensor.chest_freezer_thermometer_temperature'')))
+          }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_sensor_lost_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 1800) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: Chest Freezer thermometer offline
+            message: No readings from the Chest Freezer thermometer for 30 minutes (battery, Bluetooth
+              range, or proxy). Temperature alarm is blind until it returns. Plug drawing {{ states('sensor.chest_freezer_power')
+              }} W.
+            data:
+              tag: chest_freezer_sensor
+              group: appliance-safety
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: chest_freezer_sensor
+            title: Chest Freezer thermometer offline
+            message: No readings from the Chest Freezer thermometer for 30 minutes (battery, Bluetooth
+              range, or proxy). Temperature alarm is blind until it returns. Plug drawing {{ states('sensor.chest_freezer_power')
+              }} W.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_sensor_lost_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_sensor_lost_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (true) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: chest_freezer_sensor
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_sensor_lost_last_alert
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.chest_freezer_plug_unavailable_since
+      since_value: '{{ state_attr(''input_datetime.chest_freezer_plug_unavailable_since'',''timestamp'')
+        | float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.chest_freezer_plug_unavailable_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ true }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ not (is_number(states(''sensor.chest_freezer_power''))) }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_plug_unavailable_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 1800) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: Chest Freezer plug silent
+            message: No reports from the Chest Freezer plug for 30 minutes (it normally reports every
+              3 min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+              }} °F.
+            data:
+              tag: chest_freezer_plug
+              group: appliance-safety
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: chest_freezer_plug
+            title: Chest Freezer plug silent
+            message: No reports from the Chest Freezer plug for 30 minutes (it normally reports every
+              3 min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+              }} °F.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_plug_unavailable_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_plug_unavailable_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (true) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: chest_freezer_plug
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.chest_freezer_plug_unavailable_last_alert
+          data:
+            timestamp: 946684800
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.chest_freezer_power'')) and (as_timestamp(now()) -
+        as_timestamp(states[''sensor.chest_freezer_power''].last_reported)) > 1800 }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ state_attr(''input_datetime.chest_freezer_plug_silent_last_alert'',''timestamp'')
+          | float(0) < 1000000000 }}'
+      then:
+      - action: notify.mobile_app_iphone_13_pro
+        data:
+          title: Chest Freezer plug silent
+          message: No reports from the Chest Freezer plug for 30 minutes (it normally reports every 3
+            min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+            }} °F.
+          data:
+            tag: chest_freezer_plug
+            group: appliance-safety
+        continue_on_error: true
+      - action: persistent_notification.create
+        data:
+          notification_id: chest_freezer_plug
+          title: Chest Freezer plug silent
+          message: No reports from the Chest Freezer plug for 30 minutes (it normally reports every 3
+            min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.chest_freezer_thermometer_temperature')
+            }} °F.
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.chest_freezer_plug_silent_last_alert
+        data:
+          timestamp: '{{ as_timestamp(now()) | int }}'
+    else:
+    - if:
+      - condition: template
+        value_template: '{{ is_number(states(''sensor.chest_freezer_power'')) and state_attr(''input_datetime.chest_freezer_plug_silent_last_alert'',''timestamp'')
+          | float(0) > 1000000000 }}'
+      then:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: chest_freezer_plug
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.chest_freezer_plug_silent_last_alert
+        data:
+          timestamp: 946684800
+  mode: single
+  max_exceeded: silent
+- id: safety_kitchen_refrigerator_temperature_alarm
+  alias: 'Safety: Kitchen Refrigerator - Temperature Alarm'
+  description: 'Thermometer sits in the freezer compartment. Frost-free defrost cycles spike it to ~43
+    °F for ~35 min above 25 °F, so the 60-minute dwell is what keeps them from alarming. The fridge never
+    idles below about 16 W. Thresholds: warm above 25 °F for 60 min; recovered below 15 °F; no power =
+    plug under 1 W for 30 min. Latch: input_boolean.kitchen_refrigerator_temperature_alarm. Plug-silent
+    check: no report for 30 min via last_reported. Every alert goes to the phone (critical for warm/no-power)
+    AND the HA notification drawer (ids kitchen_refrigerator_alarm/_power/_sensor/_plug); drawer entries
+    clear themselves when the condition ends (recovered, power_back, sensor_back, plug_back). Persistent
+    onset and notification timestamps survive automation reloads and HA restarts. Re-evaluated each minute
+    and on sensor changes. Unknown readings preserve pending temperature/power timers; recovery requires
+    valid readings. No physical load control. Updated 2026-09-12.'
+  triggers:
+  - trigger: homeassistant
+    event: start
+  - trigger: event
+    event_type: automation_reloaded
+  - trigger: time_pattern
+    minutes: /1
+  - trigger: state
+    entity_id:
+    - sensor.freezer_thermometer_temperature
+    - sensor.kitchen_refrigerator_power
+    to: null
+  conditions: []
+  actions:
+  - variables:
+      since_entity: input_datetime.kitchen_refrigerator_recovered_since
+      since_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_recovered_since'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.freezer_thermometer_temperature'')) }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.freezer_thermometer_temperature'') | float(99) < 15 }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_recovered_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 600) and (is_state(''input_boolean.kitchen_refrigerator_temperature_alarm'',''on'')) }}'
+        then:
+        - action: input_boolean.turn_off
+          target:
+            entity_id: input_boolean.kitchen_refrigerator_temperature_alarm
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: kitchen_refrigerator_alarm
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: ✅ Kitchen Refrigerator back to normal
+            message: Kitchen Refrigerator freezer is back at {{ states('sensor.freezer_thermometer_temperature')
+              }} °F.
+            data:
+              tag: kitchen_refrigerator_alarm
+              group: appliance-safety
+          continue_on_error: true
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_warm_last_alert
+          data:
+            timestamp: 946684800
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_recovered_since
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.kitchen_refrigerator_warm_since
+      since_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_warm_since'',''timestamp'') |
+        float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_warm_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.freezer_thermometer_temperature'')) }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.freezer_thermometer_temperature'') | float(-99) > 25 }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_warm_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 3600) and (not is_state(''input_boolean.kitchen_refrigerator_temperature_alarm'',''on''))
+            }}'
+        then:
+        - action: input_boolean.turn_on
+          target:
+            entity_id: input_boolean.kitchen_refrigerator_temperature_alarm
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: 🥶 Kitchen Refrigerator warming up
+            message: Kitchen Refrigerator freezer reads {{ states('sensor.freezer_thermometer_temperature')
+              }} °F (alarm above 25 °F for 60 min). Plug drawing {{ states('sensor.kitchen_refrigerator_power')
+              }} W.
+            data:
+              tag: kitchen_refrigerator_alarm
+              group: appliance-safety
+              push:
+                sound:
+                  name: default
+                  critical: 1
+                  volume: 1.0
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: kitchen_refrigerator_alarm
+            title: Kitchen Refrigerator warming up
+            message: Kitchen Refrigerator freezer reads {{ states('sensor.freezer_thermometer_temperature')
+              }} °F (alarm above 25 °F for 60 min). Plug drawing {{ states('sensor.kitchen_refrigerator_power')
+              }} W.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_warm_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_warm_since
+          data:
+            timestamp: 946684800
+  - if:
+    - condition: template
+      value_template: '{{ is_state(''input_boolean.kitchen_refrigerator_temperature_alarm'',''on'') and
+        as_timestamp(now()) - (state_attr(''input_datetime.kitchen_refrigerator_warm_last_alert'',''timestamp'')
+        | float(0)) >= 3600 }}'
+    then:
+    - action: notify.mobile_app_iphone_13_pro
+      data:
+        title: 🥶 Kitchen Refrigerator still warm
+        message: Kitchen Refrigerator freezer reads {{ states('sensor.freezer_thermometer_temperature')
+          }} °F (alarm above 25 °F for 60 min). Plug drawing {{ states('sensor.kitchen_refrigerator_power')
+          }} W.
+        data:
+          tag: kitchen_refrigerator_alarm
+          group: appliance-safety
+          push:
+            sound:
+              name: default
+              critical: 1
+              volume: 1.0
+      continue_on_error: true
+    - action: persistent_notification.create
+      data:
+        notification_id: kitchen_refrigerator_alarm
+        title: Kitchen Refrigerator still warm
+        message: Kitchen Refrigerator freezer reads {{ states('sensor.freezer_thermometer_temperature')
+          }} °F (alarm above 25 °F for 60 min). Plug drawing {{ states('sensor.kitchen_refrigerator_power')
+          }} W.
+    - action: input_datetime.set_datetime
+      target:
+        entity_id: input_datetime.kitchen_refrigerator_warm_last_alert
+      data:
+        timestamp: '{{ as_timestamp(now()) | int }}'
+  - variables:
+      since_entity: input_datetime.kitchen_refrigerator_no_power_since
+      since_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_no_power_since'',''timestamp'')
+        | float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_no_power_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.kitchen_refrigerator_power'')) }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ states(''sensor.kitchen_refrigerator_power'') | float(99) < 1 }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_no_power_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 1800) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: 🔌 Kitchen Refrigerator has no power
+            message: Kitchen Refrigerator plug has drawn under 1 W for 30 minutes. Freezer reads {{ states('sensor.freezer_thermometer_temperature')
+              }} °F. Check the plug relay, the outlet, and the breaker.
+            data:
+              tag: kitchen_refrigerator_power
+              group: appliance-safety
+              push:
+                sound:
+                  name: default
+                  critical: 1
+                  volume: 1.0
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: kitchen_refrigerator_power
+            title: Kitchen Refrigerator has no power
+            message: Kitchen Refrigerator plug has drawn under 1 W for 30 minutes. Freezer reads {{ states('sensor.freezer_thermometer_temperature')
+              }} °F. Check the plug relay, the outlet, and the breaker.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_no_power_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_no_power_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (states(''sensor.kitchen_refrigerator_power'')
+            | float(0) >= 1) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: kitchen_refrigerator_power
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_no_power_last_alert
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.kitchen_refrigerator_sensor_lost_since
+      since_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_sensor_lost_since'',''timestamp'')
+        | float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_sensor_lost_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ true }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ not (is_number(states(''sensor.freezer_thermometer_temperature''))) }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_sensor_lost_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 1800) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: Kitchen Refrigerator thermometer offline
+            message: No readings from the Kitchen Refrigerator thermometer for 30 minutes (battery, Bluetooth
+              range, or proxy). Temperature alarm is blind until it returns. Plug drawing {{ states('sensor.kitchen_refrigerator_power')
+              }} W.
+            data:
+              tag: kitchen_refrigerator_sensor
+              group: appliance-safety
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: kitchen_refrigerator_sensor
+            title: Kitchen Refrigerator thermometer offline
+            message: No readings from the Kitchen Refrigerator thermometer for 30 minutes (battery, Bluetooth
+              range, or proxy). Temperature alarm is blind until it returns. Plug drawing {{ states('sensor.kitchen_refrigerator_power')
+              }} W.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_sensor_lost_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_sensor_lost_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (true) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: kitchen_refrigerator_sensor
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_sensor_lost_last_alert
+          data:
+            timestamp: 946684800
+  - variables:
+      since_entity: input_datetime.kitchen_refrigerator_plug_unavailable_since
+      since_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_plug_unavailable_since'',''timestamp'')
+        | float(0) }}'
+      last_alert_value: '{{ state_attr(''input_datetime.kitchen_refrigerator_plug_unavailable_last_alert'',''timestamp'')
+        | float(0) }}'
+  - if:
+    - condition: template
+      value_template: '{{ true }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ not (is_number(states(''sensor.kitchen_refrigerator_power''))) }}'
+      then:
+      - if:
+        - condition: template
+          value_template: '{{ since_value < 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_plug_unavailable_since
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      - if:
+        - condition: template
+          value_template: '{{ (as_timestamp(now()) - (since_value if since_value > 1000000000 else as_timestamp(now()))
+            >= 1800) and (last_alert_value < 1000000000) }}'
+        then:
+        - action: notify.mobile_app_iphone_13_pro
+          data:
+            title: Kitchen Refrigerator plug silent
+            message: No reports from the Kitchen Refrigerator plug for 30 minutes (it normally reports
+              every 3 min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.freezer_thermometer_temperature')
+              }} °F.
+            data:
+              tag: kitchen_refrigerator_plug
+              group: appliance-safety
+          continue_on_error: true
+        - action: persistent_notification.create
+          data:
+            notification_id: kitchen_refrigerator_plug
+            title: Kitchen Refrigerator plug silent
+            message: No reports from the Kitchen Refrigerator plug for 30 minutes (it normally reports
+              every 3 min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.freezer_thermometer_temperature')
+              }} °F.
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_plug_unavailable_last_alert
+          data:
+            timestamp: '{{ as_timestamp(now()) | int }}'
+      else:
+      - if:
+        - condition: template
+          value_template: '{{ since_value > 1000000000 }}'
+        then:
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_plug_unavailable_since
+          data:
+            timestamp: 946684800
+      - if:
+        - condition: template
+          value_template: '{{ last_alert_value > 1000000000 and (true) }}'
+        then:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: kitchen_refrigerator_plug
+        - action: input_datetime.set_datetime
+          target:
+            entity_id: input_datetime.kitchen_refrigerator_plug_unavailable_last_alert
+          data:
+            timestamp: 946684800
+  - if:
+    - condition: template
+      value_template: '{{ is_number(states(''sensor.kitchen_refrigerator_power'')) and (as_timestamp(now())
+        - as_timestamp(states[''sensor.kitchen_refrigerator_power''].last_reported)) > 1800 }}'
+    then:
+    - if:
+      - condition: template
+        value_template: '{{ state_attr(''input_datetime.kitchen_refrigerator_plug_silent_last_alert'',''timestamp'')
+          | float(0) < 1000000000 }}'
+      then:
+      - action: notify.mobile_app_iphone_13_pro
+        data:
+          title: Kitchen Refrigerator plug silent
+          message: No reports from the Kitchen Refrigerator plug for 30 minutes (it normally reports every
+            3 min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.freezer_thermometer_temperature')
+            }} °F.
+          data:
+            tag: kitchen_refrigerator_plug
+            group: appliance-safety
+        continue_on_error: true
+      - action: persistent_notification.create
+        data:
+          notification_id: kitchen_refrigerator_plug
+          title: Kitchen Refrigerator plug silent
+          message: No reports from the Kitchen Refrigerator plug for 30 minutes (it normally reports every
+            3 min). Dead outlet, tripped breaker, or Z-Wave loss. Freezer reads {{ states('sensor.freezer_thermometer_temperature')
+            }} °F.
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.kitchen_refrigerator_plug_silent_last_alert
+        data:
+          timestamp: '{{ as_timestamp(now()) | int }}'
+    else:
+    - if:
+      - condition: template
+        value_template: '{{ is_number(states(''sensor.kitchen_refrigerator_power'')) and state_attr(''input_datetime.kitchen_refrigerator_plug_silent_last_alert'',''timestamp'')
+          | float(0) > 1000000000 }}'
+      then:
+      - action: persistent_notification.dismiss
+        data:
+          notification_id: kitchen_refrigerator_plug
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.kitchen_refrigerator_plug_silent_last_alert
+        data:
+          timestamp: 946684800
+  mode: single
+  max_exceeded: silent
