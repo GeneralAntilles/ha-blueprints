@@ -1,0 +1,766 @@
+# Home dashboard (url_path: dashboard-home) — curated daily-driver view.
+# Source of truth for the storage-mode dashboard in HA; deploy with:
+#   python3 dashboards/push-dashboard.py home-dashboard.yaml dashboard-home
+# Re-synced with live UI edits 2026-09-09 (Alarmo tile, Ecobee AQ tiles, rain
+# card) before the A-E expansion: Attention / Outside / Power / Security
+# sections added. UI edits to the live dashboard are DRIFT — re-pull before
+# editing this file.
+# Light tiles call script.room_light_toggle: on-tap turns the room off if
+# anything is on, else recalls the room's Natural Light scene. Hold any tile
+# for more-info/brightness.
+---
+views:
+  - title: Home
+    icon: mdi:home
+    type: sections
+    max_columns: 4
+    badges:
+      - type: entity
+        entity: person.ryan_abel
+      - type: entity
+        entity: person.callan_rogers_grazado
+      - type: entity
+        entity: input_select.house_mode
+        name: House Mode
+      - type: entity
+        entity: sensor.lights_on_2
+        name: Lights On
+        icon: mdi:lightbulb-group
+    sections:
+      # Invisible when all is well: the whole section renders only if at
+      # least one signal is active, and each card gates on its own signal.
+      - type: grid
+        visibility:
+          - condition: or
+            conditions:
+              - condition: state
+                entity: alarm_control_panel.home
+                state: triggered
+              - condition: state
+                entity: lock.kitchen_back_door_lock
+                state: unlocked
+              - condition: state
+                entity: lock.living_room_front_door_lock
+                state: unlocked
+              - condition: state
+                entity: input_boolean.chest_freezer_temperature_alarm
+                state: 'on'
+              - condition: state
+                entity: input_boolean.kitchen_refrigerator_temperature_alarm
+                state: 'on'
+              - condition: numeric_state
+                entity: sensor.total_power
+                above: 10000
+              - condition: and
+                conditions:
+                  - condition: state
+                    entity: input_boolean.windows_open
+                    state: 'on'
+                  - condition: state
+                    entity: binary_sensor.window_weather_good
+                    state_not: 'on'
+        cards:
+          - type: heading
+            heading: Needs Attention
+            icon: mdi:alert-circle
+          - type: tile
+            entity: alarm_control_panel.home
+            name: ALARM TRIGGERED
+            color: red
+            visibility:
+              - condition: state
+                entity: alarm_control_panel.home
+                state: triggered
+          - type: tile
+            entity: lock.kitchen_back_door_lock
+            name: Back Door
+            color: red
+            visibility:
+              - condition: state
+                entity: lock.kitchen_back_door_lock
+                state: unlocked
+          - type: tile
+            entity: lock.living_room_front_door_lock
+            name: Front Door
+            color: red
+            visibility:
+              - condition: state
+                entity: lock.living_room_front_door_lock
+                state: unlocked
+          - type: tile
+            entity: sensor.chest_freezer_thermometer_temperature
+            name: Chest Freezer Temp Alarm
+            color: red
+            icon: mdi:snowflake-alert
+            visibility:
+              - condition: state
+                entity: input_boolean.chest_freezer_temperature_alarm
+                state: 'on'
+          - type: tile
+            entity: sensor.freezer_thermometer_temperature
+            name: Fridge Freezer Temp Alarm
+            color: red
+            icon: mdi:snowflake-alert
+            visibility:
+              - condition: state
+                entity: input_boolean.kitchen_refrigerator_temperature_alarm
+                state: 'on'
+          # Windows flagged open but the advisor says close (or can't see).
+          - type: tile
+            entity: sensor.window_advice
+            name: Close the Windows
+            color: amber
+            icon: mdi:window-closed-variant
+            tap_action:
+              action: perform-action
+              perform_action: input_boolean.turn_off
+              target:
+                entity_id: input_boolean.windows_open
+              confirmation:
+                text: Mark the windows closed and turn the AC back on?
+            visibility:
+              - condition: state
+                entity: input_boolean.windows_open
+                state: 'on'
+              - condition: state
+                entity: binary_sensor.window_weather_good
+                state_not: 'on'
+          - type: tile
+            entity: sensor.total_power
+            name: High Power Draw
+            color: amber
+            icon: mdi:flash-alert
+            visibility:
+              - condition: numeric_state
+                entity: sensor.total_power
+                above: 10000
+      - type: grid
+        cards:
+          - type: heading
+            heading: Lights
+            icon: mdi:lightbulb-multiple
+          - type: tile
+            entity: light.home
+            name: Everything
+            tap_action: &everything_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target: light.home
+                scene_entity: scene.home_natural_light_6
+            icon_tap_action: *everything_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            entity: light.common
+            name: Common Areas
+            tap_action: &common_toggle
+              action: perform-action
+              perform_action: script.common_light_toggle
+            icon_tap_action: *common_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            entity: light.living_room
+            name: Living Room
+            tap_action: &living_room_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target: light.living_room
+                scene_entity: scene.living_room_natural_light_2
+            icon_tap_action: *living_room_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            # TV use case: kill both overhead can dimmers in one tap (couch
+            # twin of the paddle's Down-2x "Lamps Only"). Display entity is
+            # the living room dimmer; tap toggles both. Interim until the
+            # cans become Hue recessed lights.
+            entity: light.living_room_dimmer
+            name: Overhead Cans
+            icon: mdi:light-recessed
+            tap_action: &cans_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target:
+                  - light.living_room_dimmer
+                  - light.dining_room_dimmer
+            icon_tap_action: *cans_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            entity: light.kitchen
+            name: Kitchen
+            tap_action: &kitchen_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target: light.kitchen
+                scene_entity: scene.kitchen_natural_light
+            icon_tap_action: *kitchen_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            entity: light.bedroom
+            name: Bedroom
+            tap_action: &bedroom_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target: light.bedroom
+                scene_entity: scene.bedroom_natural_light_7
+            icon_tap_action: *bedroom_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            entity: light.office
+            name: Office
+            tap_action: &office_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target: light.office
+                scene_entity: scene.office_natural_light_4
+            icon_tap_action: *office_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            # Area-based target (2026-09-09): covers the Hue group AND the
+            # studio/stair Z-Wave dimmers, plus anything added to the Studio
+            # area later. Hue room groups can never contain Z-Wave devices,
+            # which is why light.hall alone missed the dimmers.
+            entity: light.hall
+            name: Studio
+            tap_action: &studio_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                area_target: studio
+                scene_entity: scene.hall_natural_light_8
+            icon_tap_action: *studio_toggle
+            hold_action:
+              action: more-info
+          - type: tile
+            entity: light.guest_room
+            name: Guest Room
+            tap_action: &guest_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                # No Natural Light scene exists for this room -> plain turn_on
+                light_target: light.guest_room
+            icon_tap_action: *guest_toggle
+            hold_action:
+              action: more-info
+          # No Laundry Room tile: the room's real light is a dumb LED fixture
+          # (Hue "laundry" bulb entities are relics from the move, physical
+          # location unknown). Re-add with a scene once Hue bulbs go in.
+          - type: tile
+            entity: light.outside
+            name: Outside
+            tap_action: &outside_toggle
+              action: perform-action
+              perform_action: script.room_light_toggle
+              data:
+                light_target: light.outside
+                scene_entity: scene.outside_natural_light_10
+            icon_tap_action: *outside_toggle
+            hold_action:
+              action: more-info
+      - type: grid
+        cards:
+          - type: heading
+            heading: Climate & Air
+            icon: mdi:thermostat
+          - type: tile
+            entity: climate.downstairs
+            name: Downstairs
+            features:
+              - type: target-temperature
+          - type: tile
+            entity: climate.studio_upstairs_thermostat
+            name: Studio
+            features:
+              - type: target-temperature
+          - type: tile
+            entity: sensor.indoor_temperature
+            name: Indoor Temperature
+          - type: tile
+            entity: sensor.indoor_humidity
+            name: Indoor Humidity
+          - type: tile
+            entity: sensor.indoor_dew_point
+            name: Indoor Dew Point
+          # Indoor minus outdoor dew point: negative = house is drier than
+          # outside (normal all summer), positive = wetter (open windows).
+          - type: tile
+            entity: sensor.dew_point_delta
+            name: Dew Point vs Outside
+          # Windows Open also turns both ecobees off (and back on) - see
+          # ha-blueprints/climate/window-advisor-automations.yaml.
+          - type: tile
+            entity: input_boolean.windows_open
+            name: Windows Open
+            icon: mdi:window-open-variant
+          - type: tile
+            entity: sensor.window_advice
+            name: Window Advice
+          # 7 days of hourly means; shaded bands = sticky (55-60) and
+          # muggy (60+). Colors validated with the dataviz skill in both modes.
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            header:
+              show: true
+              title: Dew Point, Last 7 Days
+              show_states: true
+            graph_span: 7d
+            span:
+              end: hour
+            yaxis:
+              - min: '~45'
+                max: '~75'
+                decimals: 0
+                apex_config:
+                  tickAmount: 3
+            apex_config:
+              chart:
+                height: 200
+              stroke:
+                width: 2
+              grid:
+                strokeDashArray: 3
+                borderColor: rgba(128, 128, 128, 0.25)
+              legend:
+                show: true
+              annotations:
+                yaxis:
+                  - y: 55
+                    y2: 60
+                    fillColor: '#eda100'
+                    opacity: 0.08
+                    borderColor: transparent
+                  - y: 60
+                    y2: 90
+                    fillColor: '#e34948'
+                    opacity: 0.08
+                    borderColor: transparent
+            series:
+              - entity: sensor.indoor_dew_point
+                name: Indoor
+                color: '#2f7fdc'
+                float_precision: 1
+                statistics:
+                  type: mean
+                  period: hour
+              - entity: sensor.outdoor_dewpoint
+                name: Outdoor
+                color: '#e0612d'
+                float_precision: 1
+                statistics:
+                  type: mean
+                  period: hour
+          - type: tile
+            entity: sensor.airgradient_living_room_carbon_dioxide
+            name: Living Room CO2
+          - type: tile
+            entity: sensor.bedroom_co2_carbon_dioxide
+            name: Bedroom CO2
+          - type: tile
+            entity: sensor.downstairs_thermostat_ecobee_carbon_dioxide
+            name: Kitchen eCO2
+          - type: tile
+            entity: sensor.downstairs_thermostat_ecobee_volatile_organic_compounds
+            name: Kitchen VOC
+      - type: grid
+        cards:
+          - type: heading
+            heading: Outside
+            icon: mdi:weather-partly-cloudy
+          - type: weather-forecast
+            entity: weather.forecast_home
+            forecast_type: daily
+            grid_options:
+              columns: full
+          - type: tile
+            entity: sensor.outdoor_temperature
+            name: Outdoor Temperature
+          - type: tile
+            entity: sensor.weather_station_feels_like_temperature
+            name: Feels Like
+          - type: tile
+            entity: sensor.weather_station_wind_speed
+            name: Wind
+          - type: tile
+            entity: sensor.weather_station_uv_index
+            name: UV Index
+          - type: tile
+            entity: sensor.airgradient_outdoor_pm2_5
+            name: Outdoor PM2.5
+          - type: tile
+            entity: sensor.weather_station_humidity
+            name: Outdoor Humidity
+          # Rain card added via UI 2026-09-07 (rain-histogram project);
+          # visible only while it has rained in the last 30 minutes.
+          - type: custom:apexcharts-card
+            visibility:
+              - condition: state
+                entity: binary_sensor.rain_in_last_30_minutes
+                state: 'on'
+            grid_options:
+              columns: full
+            header:
+              show: true
+              title: Rain, Last 30 Minutes
+              show_states: true
+              colorize_states: true
+            graph_span: 30min
+            span:
+              end: minute
+            update_interval: 1min
+            yaxis:
+              - min: 0
+                max: '~0.1'
+                decimals: 2
+                apex_config:
+                  tickAmount: 2
+            apex_config:
+              chart:
+                height: 170
+              grid:
+                strokeDashArray: 3
+                borderColor: rgba(128, 128, 128, 0.25)
+              plotOptions:
+                bar:
+                  borderRadius: 2
+                  columnWidth: 65%
+              xaxis:
+                axisBorder:
+                  show: false
+                axisTicks:
+                  show: false
+              dataLabels:
+                enabled: false
+            series:
+              - entity: sensor.weather_station_rain_rate
+                name: Rain Rate
+                type: column
+                color: '#3b82f6'
+                float_precision: 3
+                group_by:
+                  duration: 1min
+                  func: avg
+                  fill: last
+                show:
+                  legend_value: false
+                  in_header: raw
+      - type: grid
+        cards:
+          - type: heading
+            heading: Power
+            icon: mdi:flash
+          # Same chart language as the rain card; amber #d97706 validated
+          # against light+dark surfaces (dataviz six-checks) 2026-09-09.
+          - type: custom:apexcharts-card
+            grid_options:
+              columns: full
+            header:
+              show: true
+              title: Power, Last 3 Hours
+              show_states: true
+              colorize_states: true
+            graph_span: 3h
+            span:
+              end: minute
+            update_interval: 1min
+            yaxis:
+              - min: 0
+                decimals: 0
+            apex_config:
+              chart:
+                height: 170
+              grid:
+                strokeDashArray: 3
+                borderColor: rgba(128, 128, 128, 0.25)
+              xaxis:
+                axisBorder:
+                  show: false
+                axisTicks:
+                  show: false
+              dataLabels:
+                enabled: false
+              fill:
+                type: gradient
+                gradient:
+                  opacityFrom: 0.25
+                  opacityTo: 0.02
+            series:
+              - entity: sensor.total_power
+                name: Total Power
+                type: area
+                color: '#d97706'
+                stroke_width: 2
+                float_precision: 0
+                group_by:
+                  duration: 3min
+                  func: avg
+                  fill: last
+                show:
+                  legend_value: false
+                  in_header: raw
+          - type: tile
+            entity: sensor.total_power
+            name: Total Power
+          - type: tile
+            entity: sensor.ac_power_estimate
+            name: AC Estimate
+          - type: tile
+            entity: sensor.kitchen_refrigerator_power
+            name: Refrigerator
+          - type: tile
+            entity: sensor.freezer_thermometer_temperature
+            name: Fridge Freezer Temp
+          - type: tile
+            entity: sensor.chest_freezer_power
+            name: Chest Freezer
+          - type: tile
+            entity: sensor.chest_freezer_thermometer_temperature
+            name: Chest Freezer Temp
+          # Appears only while Wheels is actually charging at home.
+          - type: tile
+            entity: sensor.home_wheels_home_charging_power
+            name: Wheels Charging
+            icon: mdi:ev-station
+            color: green
+            visibility:
+              - condition: state
+                entity: sensor.wheels_charging
+                state: charging
+      - type: grid
+        cards:
+          - type: heading
+            heading: Security
+            icon: mdi:shield-home
+          - type: tile
+            entity: alarm_control_panel.home
+            name: Alarm
+            features:
+              - type: alarm-modes
+                modes:
+                  - armed_home
+                  - armed_away
+                  - disarmed
+          - type: tile
+            entity: lock.kitchen_back_door_lock
+            name: Back Door
+          - type: tile
+            entity: lock.living_room_front_door_lock
+            name: Front Door
+      - type: grid
+        cards:
+          - type: heading
+            heading: Status
+            icon: mdi:information-outline
+          - type: tile
+            entity: script.comfort_living_room_toggle_white_noise
+            name: White Noise
+            tap_action: &white_noise
+              action: perform-action
+              perform_action: script.comfort_living_room_toggle_white_noise
+            icon_tap_action: *white_noise
+          - type: tile
+            entity: climate.wheels_climate
+            name: Wheels Climate
+          - type: tile
+            entity: lock.wheels_lock
+            name: Wheels Lock
+          - type: tile
+            entity: sensor.wheels_battery_level
+            name: Wheels Battery
+  # Health tab: filter-driven lists via auto-entities (HACS, installed
+  # 2026-09-09) — zero maintenance, cards hide themselves when empty.
+  - title: Logic
+    path: logic
+    icon: mdi:head-cog-outline
+    type: sections
+    max_columns: 2
+    # How the heuristics decide. Each card draws a *_trace sensor that the
+    # heuristic's own template publishes, or a blueprint automation's own
+    # run trace (ha-blueprints/logic-view/).
+    sections:
+      - type: grid
+        column_span: 2
+        cards:
+          - type: custom:logic-trace-card
+            entity: sensor.window_advice_trace
+            title: Window Advisor
+          - type: custom:logic-trace-card
+            entity: sensor.fresh_air_intake_filter_trace
+            title: Fresh-Air Intake Filter
+          - type: custom:logic-trace-card
+            entity: sensor.hvac_cycle_trace
+            title: HVAC Health Monitor
+          - type: custom:logic-trace-card
+            entity: sensor.kitchen_air_exhaust_trace
+            title: Kitchen Air Exhaust
+          # Blueprint automations: the card reads the automation's own run
+          # trace (evaluated variables + resolved inputs); no trace sensor.
+          - type: custom:logic-trace-card
+            entity: automation.climate_upstairs_bath_bathroom_controller
+            title: Upstairs Bath Fan
+          - type: custom:logic-trace-card
+            entity: automation.climate_laundry_room_steamer_controller
+            title: Laundry Steamer
+  - title: Health
+    path: health
+    icon: mdi:heart-pulse
+    type: sections
+    max_columns: 3
+    sections:
+      # HVAC health monitor (ha-blueprints/hvac-monitor/). Compressor state
+      # and per-cycle numbers come from whole-house per-leg power.
+      - type: grid
+        cards:
+          - type: heading
+            heading: HVAC
+            icon: mdi:hvac
+          - type: tile
+            entity: binary_sensor.hvac_compressor_running
+            name: Compressor
+          - type: tile
+            entity: sensor.hvac_compressor_last_run
+            name: Last Run
+          - type: tile
+            entity: sensor.hvac_compressor_start_watts
+            name: Compressor Watts
+          - type: tile
+            entity: sensor.hvac_blower_watts
+            name: Blower Watts
+          - type: tile
+            entity: input_datetime.hvac_filters_changed
+            name: Filters Changed
+          - type: tile
+            entity: input_button.hvac_filters_changed
+            name: Log Filter Change
+            icon_tap_action:
+              action: perform-action
+              perform_action: input_button.press
+              target:
+                entity_id: input_button.hvac_filters_changed
+              confirmation:
+                text: Log that the HVAC filters were changed today?
+          - type: tile
+            entity: sensor.fresh_air_intake_filter_life_used
+            name: Intake Filter Used
+          - type: tile
+            entity: input_boolean.fresh_air_intake_open
+            name: Intake Open
+          - type: tile
+            entity: input_datetime.fresh_air_intake_filter_changed
+            name: Intake Filter Changed
+          - type: tile
+            entity: input_button.fresh_air_intake_filter_changed
+            name: Log Intake Filter Change
+            icon_tap_action:
+              action: perform-action
+              perform_action: input_button.press
+              target:
+                entity_id: input_button.fresh_air_intake_filter_changed
+              confirmation:
+                text: Log that the fresh-air intake filter (12x12x1) was changed today?
+          - type: markdown
+            grid_options:
+              columns: full
+            content: >-
+              {% set t = state_attr('sensor.hvac_monitor_log', 'today') or {} %}
+              {% set runs = t.get('runs', []) | sort %}
+              **Today:** {{ t.get('start', 0) }} compressor starts{% if runs %}, median run
+              {{ runs[(runs | count) // 2] }} min{% endif %}.
+              {% set r = (state_attr('sensor.hvac_monitor_log', 'recent') or [])[-5:] | reverse | list %}
+              {% if r %}
+
+              **Recent incidents:**
+              {% for i in r %}
+              - {{ i[0] | timestamp_custom('%a %-I:%M %p') }} - {{ i[1] | replace('_', ' ') }}
+              {% endfor %}{% endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: Quiet Sensors
+            icon: mdi:clock-alert-outline
+          - type: markdown
+            grid_options:
+              columns: full
+            content: >-
+              {% set items = state_attr('sensor.stale_sensors', 'items') %}
+              {% if not has_value('sensor.stale_sensors') or items is none %}
+              ⚠️ The staleness watchdog isn't reporting.
+              {% elif items %}
+              {% for i in items[:15] %}
+              - **{{ i.name }}** ({{ i.device }}) - {{ i.age_h }} h, expected {{ i.tier }}
+              {% endfor %}
+              {% else %}
+              All calibrated sensors are reporting.
+              {% endif %}
+      - type: grid
+        cards:
+          - type: heading
+            heading: Lights On Right Now
+            icon: mdi:lightbulb-on
+          - type: custom:auto-entities
+            card:
+              type: entities
+            show_empty: false
+            filter:
+              include:
+                - domain: light
+                  state: 'on'
+              exclude:
+                - hidden_by: user
+                - hidden_by: integration
+            sort:
+              method: friendly_name
+      - type: grid
+        cards:
+          - type: heading
+            heading: Low Batteries
+            icon: mdi:battery-alert
+          - type: custom:auto-entities
+            card:
+              type: entities
+            show_empty: false
+            filter:
+              include:
+                - domain: sensor
+                  attributes:
+                    device_class: battery
+                  state: '< 25'
+            sort:
+              method: state
+              numeric: true
+      - type: grid
+        cards:
+          - type: heading
+            heading: Unavailable
+            icon: mdi:help-circle
+          - type: custom:auto-entities
+            card:
+              type: entities
+            show_empty: false
+            filter:
+              include:
+                - state: unavailable
+              exclude:
+                - hidden_by: user
+                - hidden_by: integration
+                - entity_category: diagnostic
+                - entity_category: config
+                - domain: event
+                - domain: update
+                - domain: button
+                - domain: scene
+                - domain: automation
+            sort:
+              method: friendly_name

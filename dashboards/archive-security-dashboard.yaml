@@ -1,0 +1,203 @@
+# ARCHIVED 2026-08-19: config of the old Security dashboard (url_path
+# dashboard-security), from two houses ago. Nearly all entities are dead
+# (all cameras, several lights/persons no longer exist in HA). Kept only
+# so the dashboard can be deleted from HA without losing anything.
+---
+title: Home
+views:
+  - path: default_view
+    title: Home
+    cards:
+      - type: custom:button-card
+        entity: binary_sensor.door_open
+        name: Doors closed
+        color: rgb(200, 80, 80)
+        state:
+          - value: 'off'
+            color: rgb(80, 200, 80)
+        styles:
+          card:
+            - width: 10rem
+      - type: grid
+        square: false
+        columns: 1
+        cards:
+          - type: entities
+            entities:
+              - entity: light.back_porch
+            title: Back porch
+          - show_state: true
+            show_name: true
+            camera_view: auto
+            type: picture-entity
+            entity: camera.back_stairs
+          - type: picture-entity
+            entity: camera.shed
+      - type: grid
+        square: false
+        columns: 1
+        cards:
+          - type: entities
+            entities:
+              - entity: light.carport
+              - entity: binary_sensor.z_wave_motion_sensor_motion_detection
+            title: Carport
+          - type: picture-entity
+            entity: camera.garage
+          - type: picture-entity
+            entity: camera.driveway
+      - type: entities
+        entities:
+          - entity: light.foyer
+          - entity: binary_sensor.front_door
+          - entity: binary_sensor.foyer_sensor_motion
+            name: Sensor Motion
+        title: Foyer
+      - type: entities
+        entities:
+          - entity: light.front_balcony
+          - entity: binary_sensor.front_balcony_door
+            name: Door
+        title: Front balcony
+      - type: grid
+        square: false
+        columns: 1
+        cards:
+          - type: entities
+            entities:
+              - entity: light.front_porch
+            title: Front porch
+          - show_state: true
+            show_name: true
+            camera_view: auto
+            type: picture-entity
+            entity: camera.ac_path
+          - type: picture-entity
+            entity: camera.west_front_yard
+          - type: picture-entity
+            entity: camera.front_door
+      - type: entities
+        entities:
+          - entity: light.hall
+          - entity: binary_sensor.hall_motion_group
+            name: Motion group
+        title: Hall
+        footer:
+          type: buttons
+          entities:
+            - entity: scene.hall_energize
+              show_icon: true
+              show_name: true
+              name: Energize
+            - entity: scene.hall_nightlight
+              show_icon: true
+              show_name: true
+              name: Nightlight
+            - entity: scene.hall_bright
+              show_icon: true
+              show_name: true
+              name: Bright
+            - entity: scene.hall_night1
+              show_icon: true
+              show_name: true
+              name: Night1
+            - entity: scene.hall_late_night
+              show_icon: true
+              show_name: true
+              name: Late night
+            - entity: scene.hall_concentrate
+              show_icon: true
+              show_name: true
+              name: Concentrate
+            - entity: scene.hall_relax
+              show_icon: true
+              show_name: true
+              name: Relax
+            - entity: scene.hall_read
+              show_icon: true
+              show_name: true
+              name: Read
+            - entity: scene.hall_dimmed
+              show_icon: true
+              show_name: true
+              name: Dimmed
+      - type: entities
+        entities:
+          - entity: light.kitchen
+          - entity: binary_sensor.carport_door
+          - entity: binary_sensor.kitchen_porch_door
+            name: Porch door
+          - entity: binary_sensor.kitchen_sensor_motion_detection
+            name: Sensor Motion detection
+        title: Kitchen
+      - type: entities
+        entities:
+          - entity: light.master_bedroom
+          - entity: binary_sensor.master_bedroom_balcony_door
+            name: Balcony door
+        title: Master bedroom
+      - type: grid
+        square: false
+        columns: 1
+        cards:
+          - type: entities
+            entities: []
+            title: Outside
+          - type: picture-entity
+            entity: camera.road
+      - type: grid
+        square: true
+        columns: 3
+        cards:
+          - type: picture-entity
+            entity: person.ryan_abel
+            aspect_ratio: '1'
+            show_name: false
+            image: data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0
+              0 50 50' width='50' height='50' style='background-color:%23b3e5fC'%3E%3Cg%3E%3Ctext
+              font-family='roboto' x='50%25' y='50%25' text-anchor='middle' stroke='%23212121'
+              font-size='1.3em' dy='.3em'%3ERA%3C/text%3E%3C/g%3E%3C/svg%3E
+          - type: picture-entity
+            entity: person.bryan_hill
+            aspect_ratio: '1'
+            show_name: false
+            image: data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0
+              0 50 50' width='50' height='50' style='background-color:%23b3e5fC'%3E%3Cg%3E%3Ctext
+              font-family='roboto' x='50%25' y='50%25' text-anchor='middle' stroke='%23212121'
+              font-size='1.3em' dy='.3em'%3EBH%3C/text%3E%3C/g%3E%3C/svg%3E
+          - type: picture-entity
+            entity: person.nicole_garcia
+            aspect_ratio: '1'
+            show_name: false
+            image: data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0
+              0 50 50' width='50' height='50' style='background-color:%23b3e5fC'%3E%3Cg%3E%3Ctext
+              font-family='roboto' x='50%25' y='50%25' text-anchor='middle' stroke='%23212121'
+              font-size='1.3em' dy='.3em'%3ENG%3C/text%3E%3C/g%3E%3C/svg%3E
+      - type: entities
+        entities:
+          - binary_sensor.z_wave_motion_sensor_motion_detection_2
+        title: Binary sensor
+      - type: entities
+        entities:
+          - tts.google_en_com
+        title: Text-to-speech (TTS)
+      - type: entities
+        entities:
+          - entity: sensor.4_in_1_sensor_air_temperature
+            name: Air temperature
+          - entity: sensor.4_in_1_sensor_humidity
+            name: Humidity
+          - entity: sensor.4_in_1_sensor_illuminance
+            name: Illuminance
+          - entity: binary_sensor.4_in_1_sensor_motion_detection
+            name: Motion detection
+        title: 4-in-1 Sensor
+      - type: entities
+        entities:
+          - entity: sensor.outdoor_motion_sensor_illuminance
+            name: Illuminance
+          - entity: binary_sensor.outdoor_motion_sensor_motion_detection
+            name: Motion detection
+          - entity: binary_sensor.outdoor_motion_sensor_power_has_been_applied
+            name: Power has been applied
+        title: Outdoor Motion Sensor
