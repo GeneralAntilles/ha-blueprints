@@ -1,0 +1,211 @@
+# Controller Guide overlay: the hand-maintained half of the guide.
+#
+# labels:      phrase for an action signature (see guide/summarize.py for the
+#              signature format; build-report.txt lists every unlabeled one).
+#              `short` is for the mini label / card (about 4 words, written for
+#              a guest), `long` for the letter sheet and website.
+# groups:      several automations shown as ONE card (identical twin remotes).
+#              The build warns if the members' buttons ever differ.
+# controllers: per-card overrides keyed by slug, device_id or automation id:
+#              title, location, notes, control_labels, gestures{"b1.hold": ...},
+#              hide["b1.release"].
+# manual:      controllers HA knows nothing about (Hue app bindings).
+# vzm35:       wording for the Inovelli fan switch cards (from the Inovelli manual).
+
+site:
+  title: House Controllers
+  base_url: http://ha.local:8123/local/controller-guide
+
+labels:
+  # ---- whole-house / common areas ----
+  script.common_light_toggle:
+    short: Downstairs lights
+    long: Downstairs living areas on or off (Natural Light)
+  script.common_light_on:
+    short: Downstairs lights on
+    long: Downstairs living areas on (Natural Light)
+  script.common_light_off:
+    short: Downstairs lights off
+    long: Downstairs living areas off, including ceiling lights and wall panels
+  scene.turn_on:scene.home_natural_light_6:
+    short: Whole house on
+    long: Every Hue light in the house on (Natural Light)
+  light.turn_on:light.home@brightness_pct=100:
+    short: Everything bright
+    long: Every Hue light in the house to 100%
+  light.turn_off:light.common,light.lines_4aa3,light.living_room_lines,light.shapes_8d35:
+    short: Downstairs lights off
+    long: Downstairs living-area lights and the wall light panels off
+  light.turn_off:light.home,light.lines_4aa3,light.living_room_lines,light.shapes_8d35:
+    short: All lights off
+    long: Every Hue light in the house and the wall light panels off
+  script.outdoor_all_on:
+    short: Outside lights on
+    long: Outside lights on
+  script.outdoor_all_off:
+    short: Outside lights off
+    long: Outside lights off
+
+  # ---- master bedroom ----
+  script.ryan_bedroom_wake_up:
+    short: Good morning
+    long: "Morning: bedroom lights on, white noise off, bug zapper on, house back to Normal mode"
+  script.ryan_bedroom_sleep:
+    short: Bedtime
+    long: "Bedtime: white noise on, bedroom lights off, bug zapper off, house to Sleep mode"
+  light.turn_off:light.bedroom:
+    short: Lamps off
+    long: Bedroom Hue lights off
+  script.ryan_bedroom_lights_time_of_day:
+    short: Lamps on
+    long: Bedroom Hue lights on (Natural Light)
+
+  # ---- guest bedroom ----
+  script.room_light_toggle@light_target=light.upstairs_common@scene_entity=scene.upstairs_common_natural_light_16:
+    short: Upstairs lights
+    long: Upstairs hall lights on or off (Natural Light)
+  script.guest_bedroom_wake_up:
+    short: Good morning
+    long: "Morning: white noise off, room lights on"
+  script.guest_bedroom_sleep:
+    short: Bedtime
+    long: "Bedtime: white noise on, room lights off"
+  light.turn_off:light.guest_room:
+    short: Lights off
+    long: Guest room lights off
+  scene.turn_on:scene.guest_room_natural_light_15:
+    short: Lights on
+    long: Guest room lights on (Natural Light)
+  fan.toggle:fan.guest_bedroom_fan_fan:
+    short: Fan on/off
+    long: Ceiling fan on or off
+  script.guest_bedroom_fan_step:
+    short: Fan speed
+    long: "Next fan speed: low › medium › high › off"
+
+  # ---- living room / TV ----
+  switch.toggle:switch.sync_box_light_sync:
+    short: TV light sync
+    long: Hue lights follow the TV picture, on or off
+  script.sync_box_mode_step:
+    short: Sync mode
+    long: "Next light-sync mode: video › music › game"
+  script.media_lighting_step:
+    short: Movie lighting
+    long: Dim movie lighting (Relax). Press again for Nightlight.
+  script.media_lighting_off:
+    short: Normal lighting
+    long: Back to normal lighting (Natural Light)
+  script.overhead_lights_toggle:
+    short: Ceiling lights
+    long: Living and dining ceiling lights on or off, at the time-of-day level
+  script.overhead_lights_toggle@brightness_pct=100:
+    short: Ceiling lights 100%
+    long: Living and dining ceiling lights on at 100%
+  script.comfort_living_room_toggle_white_noise:
+    short: Nothing yet
+    long: Nothing yet (meant for white noise, but no smart plug is set up)
+  ? "device:climate.set_hvac_mode:climate.wheels_climate@hvac_mode=heat_cool + tts.speak:tts.google_en_com@cache=True@media_player_entity_id=media_player.living_room_3@message=tpl:5446d493"
+  : short: Warm up the car
+    long: Turns on the Tesla's climate and announces it on the living room speaker
+
+  # ---- office (cube) ----
+  script.room_light_toggle@light_target=light.office@scene_entity=scene.office_natural_light_4:
+    short: Lights on/off
+    long: Office lights on or off (Natural Light)
+  switch.toggle:switch.office_office_white_noise:
+    short: White noise
+    long: White noise on or off
+  fan.toggle:fan.office_fan:
+    short: Fan on/off
+    long: Ceiling fan on or off
+  fan.increase_speed:fan.office_fan:
+    short: Fan faster
+    long: Ceiling fan one speed faster
+  fan.decrease_speed:fan.office_fan:
+    short: Fan slower
+    long: Ceiling fan one speed slower
+  fan.turn_off:fan.office_fan:
+    short: Fan off
+    long: Ceiling fan off
+  media_player.media_play_pause:media_player.ryan_tv:
+    short: Play/pause
+    long: TV play or pause
+  repeat:media_player.volume_up:media_player.ryan_tv:
+    short: Volume up
+    long: TV volume up (turn further for more)
+  repeat:media_player.volume_down:media_player.ryan_tv:
+    short: Volume down
+    long: TV volume down (turn further for more)
+  media_player.toggle:media_player.ryan_tv:
+    short: TV on/off
+    long: TV on or off
+  ? "light.turn_off:light.office + switch.turn_off:switch.office_office_white_noise + media_player.turn_off:media_player.ryan_tv + fan.turn_off:fan.office_fan"
+  : short: Everything off
+    long: Office lights, white noise, TV and ceiling fan all off
+
+groups:
+  bedroom-remotes:
+    title: Bedroom Remotes
+    members: [minimote_ryan, minimote_callan]
+
+controllers:
+  bedroom-remotes:
+    location: Master bedroom nightstands
+    notes:
+      - Both bedroom remotes do the same thing.
+      - Hold means press and keep pressing for about a second.
+  guest-bedroom-remote:
+    location: Guest bedroom
+    notes:
+      - Hold means press and keep pressing for about a second.
+  living-room-remote:
+    location: Living room
+    notes:
+      - Hold means press and keep pressing for about a second.
+  dining-room-dimmer:
+    location: Dining room
+  hall-remote:
+    location: Hall
+    # Button 3 still calls the (now empty) white-noise script, kept bound so
+    # a future common-area white noise plug only needs adding to the script.
+    hide: [b3.single]
+  living-room-fan:
+    # Common area, not a bedroom: the light bar can stay on at night.
+    led_night_off_not_needed: true
+  dice-remote:
+    title: Office Cube
+    location: Office desk
+    control_labels:
+      face1: Lights side (logo on top)
+      face2: Fan side
+      face3: TV side
+    notes:
+      - The little dots on each side are its number. Put the cube down with the side you want on top, then tap, turn or slide it.
+  bedroom-tap:
+    notes:
+      - The Hue app decides what these buttons do to the lamps. Home Assistant only adds the ceiling lights.
+
+vzm35:
+  up_1x: Fan on
+  up_1x_long: Fan on
+  up_hold: Faster
+  up_hold_long: Hold to speed the fan up
+  down_1x: Fan off
+  down_1x_long: Fan off
+  down_hold: Slower
+  down_hold_long: Hold to slow the fan down
+  config: Not used
+  config_long: Not used day to day
+  air_gap_note: Pull the small tab under the paddle out to cut power to the fan, for example before cleaning it.
+
+manual: []
+  # Hue switches are programmed in the Hue app, so fill these in from there.
+  # Example:
+  # - device_id: c73ed305ff08d676009d016f1d59c210   # Studio Hue Dimmer
+  #   layout: hue-dimmer
+  #   buttons:
+  #     1: {press: Lights on, hold: Scene cycle}
+  #     2: {press: Brighter}
+  #     3: {press: Dimmer}
+  #     4: {press: Lights off}

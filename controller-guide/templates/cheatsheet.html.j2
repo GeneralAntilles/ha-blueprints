@@ -1,0 +1,33 @@
+{% extends "base.html.j2" %}
+{% block head %}<style>@page { size: letter landscape; margin: 0.4in; }</style>{% endblock %}
+{% block body_class %}screen cheatsheet{% endblock %}
+{% block main %}
+<h1>Every button in the house</h1>
+<p class="lede print-hide">The everyday gestures for every controller. Each controller's page has the rest. <button type="button" class="button" data-print>Print</button></p>
+<div class="overflow">
+<table class="cheat">
+  <thead>
+    <tr><th scope="col">Controller</th><th scope="col">Button</th><th scope="col">What it does</th></tr>
+  </thead>
+  {% for floor, items in floors %}{% for c in items %}
+  {% set controls = c.controls | selectattr("gestures") | list %}
+  <tbody class="cheat-group">
+    {% for control in controls %}
+    <tr>
+      {% if loop.first %}
+      <th scope="rowgroup" rowspan="{{ controls | length }}">{{ c.title }}<span class="cheat-where">{{ c.location }}</span></th>
+      {% endif %}
+      <td class="cheat-button"><span class="badge small" aria-hidden="true">{{ control.badge }}</span> {{ control.label }}</td>
+      <td class="cheat-does">
+        {% for g in control.gestures | tier(2) %}
+        <span class="cheat-g{{ ' broken' if g.broken }}"><span class="glyph" aria-hidden="true">{{ g.glyph }}</span> <b>{{ g.word }}:</b> {{ g.short }}{% if g.broken %} <span class="flag">Not working</span>{% endif %}</span>
+        {% endfor %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+  {% endfor %}{% endfor %}
+</table>
+</div>
+<p class="print-foot">Build {{ v }}, {{ built }}. The full guide is in Home Assistant under Controllers.</p>
+{% endblock %}

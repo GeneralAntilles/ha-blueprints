@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{ page_title }} | {{ site.title }}</title>
+<link rel="stylesheet" href="{{ root }}static/guide.css?v={{ v }}">
+{% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}screen{% endblock %}" data-version="{{ v }}" data-root="{{ root }}">
+<a class="skip" href="#main">Skip to content</a>
+{% block header %}
+<header class="masthead">
+  <a class="wordmark" href="{{ (root ~ 'index.html') | v }}">{{ site.title }}</a>
+  <nav aria-label="Sections">
+    <a href="{{ (root ~ 'index.html') | v }}">All controllers</a>
+    <a href="{{ (root ~ 'cheatsheet.html') | v }}">Cheat sheet</a>
+    <a href="{{ (root ~ 'print/letter.html') | v }}">Print sheets</a>
+    <a href="{{ (root ~ 'print/card-2up.html') | v }}">Cards</a>
+    <a href="{{ (root ~ 'print/mini-10up.html') | v }}">Labels</a>
+  </nav>
+</header>
+{% endblock %}
+<main id="main">
+{% block main %}{% endblock %}
+</main>
+{% block footer %}
+<footer class="colophon">
+  <p>Built from Home Assistant on {{ built }}. Build {{ v }}.</p>
+</footer>
+{% endblock %}
+<script src="{{ root }}static/guide.js?v={{ v }}"></script>
+</body>
+</html>

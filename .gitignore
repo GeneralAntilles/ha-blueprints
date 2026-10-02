@@ -14,3 +14,8 @@ __pycache__/
 .idea/
 *.swp
 *.swo
+
+# Controller Guide build output, and the HA/Hue snapshot it is built from
+# (re-fetched by fetch.py; holds device ids and hardware addresses)
+controller-guide/dist/
+controller-guide/data/snapshot.json

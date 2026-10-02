@@ -1,0 +1,7 @@
+{% extends "base.html.j2" %}
+{% from "partials/cards.html.j2" import mini, toolbar %}
+{% block head %}<style>@page { size: 3.5in 2in; margin: 0.12in; }</style>{% endblock %}
+{% block body_class %}print-doc mini-doc{% endblock %}
+{% block header %}{{ toolbar(root, "3.5 × 2 in labels (business-card size), one per page, everyday gesture per button.") }}{% endblock %}
+{% block main %}{% for c in active %}{{ mini(c, qr, built) }}{% endfor %}{% endblock %}
+{% block footer %}{% endblock %}

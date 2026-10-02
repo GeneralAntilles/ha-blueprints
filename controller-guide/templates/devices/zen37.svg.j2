@@ -1,0 +1,9 @@
+{#- Zooz ZEN37 800LR, from the Zooz product photo: two large buttons stacked
+    (1 top, 2 middle) and two small ones side by side (3 left, 4 right). -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.wallplate() }}
+<rect class="dev-line" x="37" y="36" width="46" height="45" rx="2"/>
+<rect class="dev-line" x="37" y="84" width="46" height="45" rx="2"/>
+<rect class="dev-line" x="37" y="132" width="21.5" height="22" rx="2"/><rect class="dev-line" x="61.5" y="132" width="21.5" height="22" rx="2"/>
+{{ k.badge(c, "b1", 60, 58.5) }}{{ k.badge(c, "b2", 60, 106.5) }}{{ k.badge(c, "b3", 47.75, 143, 7.5) }}{{ k.badge(c, "b4", 72.25, 143, 7.5) }}
+</svg>

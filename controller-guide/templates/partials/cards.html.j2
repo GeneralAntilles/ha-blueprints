@@ -1,0 +1,43 @@
+{% from "partials/legend.html.j2" import drawing, compact_rows %}
+
+{% macro card(c, qr, built) -%}
+{% set leds = c.leds | selectattr("tier", "le", 2) | list %}
+<article class="card {{ c | density(2, 10, 18) }} floor-{{ (c.floor or 'other') | lower | replace(' ', '-') }}" data-slug="{{ c.slug }}">
+  <header class="card-head">
+    <h1>{{ c.title }}</h1>
+    <p class="where">{{ c.location }}{% if c.floor %}<span class="floor-tag">{{ c.floor }}</span>{% endif %}</p>
+  </header>
+  <div class="card-body">
+    <div class="card-art">{{ drawing(c) }}</div>
+    <div class="card-legend">{{ compact_rows(c, 2) }}</div>
+  </div>
+  {% if leds or c.notes %}
+  <div class="card-extra">
+    {% for ln in leds %}<p class="card-led">{% if ln.swatches | length == 1 %}{% set sw = ln.swatches[0] %}<i class="dot" style="{{ 'background:' ~ sw[0] if sw[0] else '' }}" title="{{ sw[1] }}"></i>{% endif %}{{ ln.text }}{% if ln.swatches | length > 1 %} <span class="dot-key">{% for css, label in ln.swatches %}<span class="dot-pair"><i class="dot" style="{{ 'background:' ~ css if css else '' }}"></i>{{ label }}</span>{% endfor %}</span>{% endif %}</p>{% endfor %}
+    {% for n in c.notes[:2] %}<p class="card-note">{{ n }}</p>{% endfor %}
+  </div>
+  {% endif %}
+  <footer class="card-foot"><span>Rev {{ c.rev }}, made {{ built }}</span>{% if qr[c.slug] %}<span class="card-qr">{{ qr[c.slug] }}</span>{% endif %}</footer>
+</article>
+{%- endmacro %}
+
+{% macro mini(c, qr, built) -%}
+<article class="mini {{ c | density(1, 4, 6) }}" data-slug="{{ c.slug }}">
+  <div class="mini-art">{{ drawing(c) }}</div>
+  <div class="mini-text">
+    <h1>{{ c.title }}</h1>
+    {{ compact_rows(c, 1) }}
+  </div>
+  <span class="mini-rev">Rev {{ c.rev }}, made {{ built }}</span>
+  {% if qr[c.slug] %}<span class="mini-qr">{{ qr[c.slug] }}</span>{% endif %}
+</article>
+{%- endmacro %}
+
+{% macro toolbar(root, text, extra="") -%}
+<header class="print-toolbar print-hide">
+  <a href="{{ (root ~ 'index.html') | v }}">Back to all controllers</a>
+  <p>{{ text }} <span data-only-note hidden>Showing selected controllers.</span></p>
+  {{ extra }}
+  <button type="button" class="button" data-print>Print</button>
+</header>
+{%- endmacro %}

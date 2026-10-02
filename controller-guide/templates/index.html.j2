@@ -1,0 +1,51 @@
+{% extends "base.html.j2" %}
+{% from "partials/legend.html.j2" import badge, drawing %}
+{% block main %}
+<div class="intro">
+  <h1>What does this button do?</h1>
+  <p>Find the remote or switch, then find the number on it.</p>
+  <label class="search">
+    <span class="visually-hidden">Search controllers</span>
+    <input type="search" id="q" placeholder="Search by room, remote or what it does" autocomplete="off">
+  </label>
+</div>
+
+{% for floor, items in floors %}
+<section class="floor floor-{{ floor | lower | replace(' ', '-') }}" aria-labelledby="floor-{{ loop.index }}">
+  <h2 id="floor-{{ loop.index }}">{{ floor }}</h2>
+  <ul class="roster">
+  {% for c in items %}
+    <li class="entry" data-search="{{ (c.title ~ ' ' ~ c.location ~ ' ' ~ c.model ~ ' ' ~ (c.controls | map(attribute='gestures') | sum(start=[]) | map(attribute='long') | join(' '))) | lower }}">
+      <a class="entry-link" href="{{ ('controllers/' ~ c.slug ~ '.html') | v }}">
+        <span class="entry-thumb" aria-hidden="true">{{ drawing(c) }}</span>
+        <span class="entry-title">{{ c.title }}</span>
+        <span class="entry-where">{{ c.location }}</span>
+        {% if c.has_broken %}<span class="flag">Something isn't working</span>{% endif %}
+      </a>
+      <ul class="glance">
+      {% if not (c.controls | map(attribute='gestures') | sum(start=[]) | tier(1) | list) %}
+        <li class="hint">{{ "Programmed in the Hue app. Open for details." if c.layout.startswith("hue") else "Open for details." }}</li>
+      {% endif %}
+      {% for control in c.controls %}
+        {% set first = (control.gestures | tier(1) | list) %}
+        {% if first %}
+        <li>{{ badge(control, "small") }}<span class="visually-hidden">{{ control.label }}:</span> {{ first[0].short }}{% if first | length > 1 %}, {{ first[1].short }}{% endif %}</li>
+        {% endif %}
+      {% endfor %}
+      </ul>
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endfor %}
+<p id="no-results" class="empty" hidden>Nothing matches. Try a room name like "office" or an action like "fan".</p>
+
+{% if disabled %}
+<section class="floor muted" aria-labelledby="floor-off">
+  <h2 id="floor-off">Switched off in Home Assistant</h2>
+  <ul class="roster">
+  {% for c in disabled %}<li class="entry"><a class="entry-link" href="{{ ('controllers/' ~ c.slug ~ '.html') | v }}"><span class="entry-title">{{ c.title }}</span><span class="entry-where">{{ c.location }}</span></a></li>{% endfor %}
+  </ul>
+</section>
+{% endif %}
+{% endblock %}

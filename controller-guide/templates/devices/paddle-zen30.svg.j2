@@ -1,0 +1,11 @@
+{#- Zooz ZEN30 double switch, from the product photo: dimmer paddle on top
+    with a column of 7 LED dots to its right, the relay button below it. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.wallplate() }}
+<rect class="dev-line" x="37" y="36" width="39" height="88" rx="2"/>
+<line class="dev-line faint" x1="39" y1="80" x2="74" y2="80"/>
+{% for i in range(7) %}<circle class="dev-fill" cx="80.5" cy="{{ 42 + i * 6.5 }}" r="1"/>{% endfor %}
+<rect class="dev-line" x="37" y="128" width="46" height="22" rx="2"/>
+<rect class="dev-line thin" x="38" y="152" width="8" height="3" rx="1"/>
+{{ k.badge(c, "up", 56.5, 58) }}{{ k.badge(c, "down", 56.5, 102) }}{{ k.badge(c, "relay", 60, 139, 7.5) }}
+</svg>

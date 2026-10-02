@@ -1,0 +1,10 @@
+{#- Zooz ZEN77, from the product photo: full-height paddle, a small air-gap
+    tab bottom left and the LED indicator bottom right. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.wallplate() }}
+<rect class="dev-line" x="37" y="36" width="46" height="110" rx="2"/>
+<line class="dev-line faint" x1="39" y1="91" x2="81" y2="91"/>
+<rect class="dev-line thin" x="38" y="149" width="9" height="4" rx="1"/>
+<rect class="dev-line thin" x="74" y="150" width="8" height="2" rx="1"/>
+{{ k.badge(c, "up", 60, 63) }}{{ k.badge(c, "down", 60, 119) }}
+</svg>

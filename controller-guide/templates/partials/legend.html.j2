@@ -1,0 +1,68 @@
+{% macro badge(control, size="") -%}
+<span class="badge {{ size }}" aria-hidden="true">{{ control.badge }}</span>
+{%- endmacro %}
+
+{% macro gesture_rows(control, max_tier=3, long=true) -%}
+{% for g in control.gestures | tier(max_tier) %}
+<tr class="{{ 'broken' if g.broken }}{{ ' from-' ~ g.source if g.source != 'ha' }}">
+  <th scope="row" class="how"><span class="glyph" aria-hidden="true">{{ g.glyph }}</span> {{ g.word }}</th>
+  <td class="what">
+    {{ g.long if long else g.short }}
+    {% for cond in g.conditions %}<span class="cond">{{ cond }}</span>{% endfor %}
+    {% if g.broken %}<span class="flag">Not working right now</span>{% endif %}
+    {% if g.source == 'hue' %}<span class="src">set in the Hue app</span>{% endif %}
+  </td>
+</tr>
+{% endfor %}
+{%- endmacro %}
+
+{% macro control_block(control, max_tier=3, long=true, heading="h3") -%}
+{% set rows = control.gestures | tier(max_tier) %}
+<section class="control" aria-labelledby="ctl-{{ control.id }}">
+  <{{ heading }} id="ctl-{{ control.id }}" class="control-name">{{ badge(control) }}<span>{{ control.label }}</span></{{ heading }}>
+  {% if rows %}
+  <table class="gestures">
+    <tbody>{{ gesture_rows(control, max_tier, long) }}</tbody>
+  </table>
+  {% else %}
+  <p class="unused">Not used</p>
+  {% endif %}
+</section>
+{%- endmacro %}
+
+{% macro drawing(c) -%}
+{% include "devices/" ~ c.drawing ~ ".svg.j2" %}
+{%- endmacro %}
+
+{% macro compact_rows(c, max_tier) -%}
+{% for control in c.controls %}
+{% set rows = control.gestures | tier(max_tier) | list %}
+{% if rows %}
+<div class="crow">
+  <span class="badge" aria-hidden="true">{{ control.badge }}</span>
+  <div class="crow-body">
+    <span class="visually-hidden">{{ control.label }}:</span>
+    {% for g in rows %}
+    <span class="cg{{ ' broken' if g.broken }}"><span class="glyph" aria-hidden="true">{{ g.glyph }}</span><span class="cg-text"><b>{{ g.word }}</b> {{ g.short }}{% if g.broken %} <span class="flag">Not working</span>{% endif %}</span></span>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+{% endfor %}
+{%- endmacro %}
+
+{% macro led_section(c, max_tier=3, heading="h2") -%}
+{% set lines = c.leds | selectattr("tier", "le", max_tier) | list %}
+{% if lines %}
+<section class="leds" aria-labelledby="leds-{{ c.slug }}">
+  <{{ heading }} id="leds-{{ c.slug }}">What the lights mean</{{ heading }}>
+  <ul>
+  {% for ln in lines %}
+    <li{% if ln.source == 'notification' %} class="led-note"{% endif %}>{{ ln.text }}
+      {% if ln.swatches %}<span class="swatches">{% for css, label in ln.swatches %}<span class="swatch"><i style="{{ 'background:' ~ css if css else '' }}"{% if not css %} class="off"{% endif %}></i>{{ label }}</span>{% endfor %}</span>{% endif %}
+    </li>
+  {% endfor %}
+  </ul>
+</section>
+{% endif %}
+{%- endmacro %}

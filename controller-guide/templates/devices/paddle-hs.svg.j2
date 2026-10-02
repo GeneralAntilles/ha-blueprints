@@ -1,0 +1,10 @@
+{#- HomeSeer HS-WX300, from the HomeSeer product render: a column of 7 LEDs
+    down the LEFT side of the paddle, small tabs along the bottom. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.wallplate() }}
+{% for i in range(7) %}<circle class="dev-fill" cx="40.5" cy="{{ 46 + i * 15.5 }}" r="1"/>{% endfor %}
+<rect class="dev-line" x="44" y="36" width="39" height="112" rx="2"/>
+<line class="dev-line faint" x1="46" y1="92" x2="81" y2="92"/>
+<line class="dev-line thin" x1="44" y1="152" x2="83" y2="152"/><line class="dev-line thin" x1="57" y1="149" x2="57" y2="155"/><line class="dev-line thin" x1="70" y1="149" x2="70" y2="155"/>
+{{ k.badge(c, "up", 63.5, 64) }}{{ k.badge(c, "down", 63.5, 120) }}
+</svg>

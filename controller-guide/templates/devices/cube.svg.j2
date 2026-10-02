@@ -1,0 +1,13 @@
+{#- Aqara Cube T1 Pro, from the Aqara product photos: rounded cube, an inset
+    panel on every face, dice dots near an edge of each face (the dots are
+    the face number). Drawn with face 1 up and faces 2 and 3 showing, which
+    is how 1, 2 and 3 meet on a standard die. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c, 160, 170) }}
+<path class="dev-line" d="M80 20 L140 50 L140 120 L80 150 L20 120 L20 50 Z"/>
+<path class="dev-line" d="M20 50 L80 80 L140 50 M80 80 L80 150"/>
+<path class="dev-line thin" d="M80 29 L125 51.5 L80 74 L35 51.5 Z"/>
+<path class="dev-line thin" d="M27 60 L73 83 L73 138 L27 115 Z"/>
+<path class="dev-line thin" d="M133 60 L87 83 L87 138 L133 115 Z"/>
+{{ k.dots(2, 33, 72) }}{{ k.dots(3, 127, 72) }}
+{{ k.badge(c, "face1", 80, 51.5) }}{{ k.badge(c, "face2", 50, 99) }}{{ k.badge(c, "face3", 110, 99) }}
+</svg>

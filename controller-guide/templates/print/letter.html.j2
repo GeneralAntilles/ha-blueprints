@@ -1,0 +1,36 @@
+{% extends "base.html.j2" %}
+{% from "partials/legend.html.j2" import control_block, drawing, led_section %}
+{% block head %}<style>@page { size: letter; margin: 0.5in; }</style>{% endblock %}
+{% block body_class %}print-doc letter{% endblock %}
+{% block header %}
+<header class="print-toolbar print-hide">
+  <a href="{{ (root ~ 'index.html') | v }}">Back to all controllers</a>
+  <p>One controller per Letter page. <span data-only-note hidden>Showing one controller.</span></p>
+  <button type="button" class="button" data-print>Print</button>
+</header>
+{% endblock %}
+{% block main %}
+{% for c in active %}
+<article class="page" data-slug="{{ c.slug }}">
+  <header class="page-head">
+    <h1>{{ c.title }}</h1>
+    <p class="where">{{ c.location }}</p>
+  </header>
+  <div class="sheet-body">
+    <figure class="sheet-art">{{ drawing(c) }}</figure>
+    <div class="controls">
+    {% for control in c.controls %}{{ control_block(control, 3, true, "h2") }}{% endfor %}
+    </div>
+  </div>
+  {{ led_section(c) }}
+  {% if c.notes %}
+  <ul class="notes">{% for n in c.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+  {% endif %}
+  <footer class="page-foot">
+    <span>Revision {{ c.rev }}, made {{ built }}</span>
+    {% if qr[c.slug] %}<span class="page-qr">{{ qr[c.slug] }}<span>Scan for this page</span></span>{% endif %}
+  </footer>
+</article>
+{% endfor %}
+{% endblock %}
+{% block footer %}{% endblock %}

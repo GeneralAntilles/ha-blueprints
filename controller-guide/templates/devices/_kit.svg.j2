@@ -1,0 +1,38 @@
+{#- Shared pieces for device drawings. Lines use currentColor; badges use the
+    page's badge colour (CSS classes, since the SVG is inlined). A badge is
+    drawn only when the controller has a control with that id, so an unused
+    button stays a plain outline. -#}
+{% macro badge(c, id, x, y, r=9) -%}
+{% set ctl = (c.controls | selectattr("id", "equalto", id) | list) %}
+{% if ctl %}
+<g class="dev-badge" aria-hidden="true"><circle cx="{{ x }}" cy="{{ y }}" r="{{ r }}"/><text x="{{ x }}" y="{{ y }}" dy="0.36em" text-anchor="middle" font-size="{{ r * 1.15 }}">{{ ctl[0].badge }}</text></g>
+{% endif %}
+{%- endmacro %}
+
+{#- Screwless decora plate (as in the Zooz product photos): outer plate, a
+    faint bevel line, and the decora opening the device sits in. -#}
+{% macro wallplate() -%}
+<rect class="dev-line" x="8" y="6" width="104" height="178" rx="10"/>
+<rect class="dev-line faint" x="13" y="11" width="94" height="168" rx="7"/>
+<rect class="dev-line" x="34" y="33" width="52" height="124" rx="3"/>
+{%- endmacro %}
+
+{#- Hue wall plate: the remote sits on a magnetic plate. -#}
+{% macro hueplate() -%}
+<rect class="dev-line" x="10" y="12" width="100" height="164" rx="6"/>
+{%- endmacro %}
+
+{% macro dots(n, cx, cy, gap=3.2, r=0.9) -%}
+{% set layouts = {1: [(0,0)], 2: [(0,-1),(0,1)], 3: [(-1,-1),(0,0),(1,1)], 4: [(-1,-1),(1,-1),(-1,1),(1,1)], 5: [(-1,-1),(1,-1),(0,0),(-1,1),(1,1)], 6: [(-1,-1),(1,-1),(-1,0),(1,0),(-1,1),(1,1)]} %}
+{% for dx, dy in layouts[n] %}<circle class="dev-fill" cx="{{ cx + dx * gap }}" cy="{{ cy + dy * gap }}" r="{{ r }}"/>{% endfor %}
+{%- endmacro %}
+
+{% macro svg_open(c, w=120, h=190) -%}
+<svg class="device" viewBox="0 0 {{ w }} {{ h }}" role="img" aria-labelledby="dev-{{ c.slug }}-t"><title id="dev-{{ c.slug }}-t">Drawing of the {{ c.title }} with numbered buttons</title>
+{%- endmacro %}
+
+{#- Hue brightness icon: a small sun with 8 rays. -#}
+{% macro sun(cx, cy, r) -%}
+<circle class="dev-line thin" cx="{{ cx }}" cy="{{ cy }}" r="{{ r }}"/>
+{% for i in range(8) %}{% set a = i * 0.785398 %}<line class="dev-line thin" x1="{{ cx + (r + 1.2) * a|cos }}" y1="{{ cy + (r + 1.2) * a|sin }}" x2="{{ cx + (r + 2.8) * a|cos }}" y2="{{ cy + (r + 2.8) * a|sin }}"/>{% endfor %}
+{%- endmacro %}

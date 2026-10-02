@@ -1,0 +1,13 @@
+{#- Inovelli Blue series (VZM35-SN fan switch shares the housing), from the
+    Inovelli product photo: paddle on the left; on the right a small config
+    button at the top and the LED bar below it; air-gap tab bottom left. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.wallplate() }}
+<rect class="dev-line" x="37" y="36" width="37" height="116" rx="2"/>
+<line class="dev-line faint" x1="39" y1="94" x2="72" y2="94"/>
+<rect class="dev-line" x="77" y="37" width="6" height="13" rx="1.5"/>
+<rect class="dev-line thin" x="78.6" y="56" width="2.8" height="92" rx="1.4"/>
+<rect class="dev-line thin" x="38" y="152" width="9" height="3" rx="1"/>
+<line class="dev-line thin" x1="83" y1="43.5" x2="92" y2="43.5"/>
+{{ k.badge(c, "up", 55.5, 65) }}{{ k.badge(c, "down", 55.5, 123) }}{{ k.badge(c, "config", 99, 43.5, 7) }}
+</svg>

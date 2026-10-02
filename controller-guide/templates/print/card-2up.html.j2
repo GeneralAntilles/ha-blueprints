@@ -1,0 +1,14 @@
+{% extends "base.html.j2" %}
+{% from "partials/cards.html.j2" import card, toolbar %}
+{% block head %}<style>@page { size: letter; margin: 0; }</style>{% endblock %}
+{% block body_class %}print-doc sheet-doc{% endblock %}
+{% block header %}{{ toolbar(root, "Two 6 × 4 in cards per Letter page, with crop marks. Print at 100% (no scaling), then cut on the marks.") }}{% endblock %}
+{% block main %}
+{% for pair in active | batch(2) %}
+<section class="print-sheet two-up">
+  {% for c in pair %}<div class="slot slot-{{ loop.index }}">{{ card(c, qr, built) }}</div>{% endfor %}
+  <div class="crops" aria-hidden="true"></div>
+</section>
+{% endfor %}
+{% endblock %}
+{% block footer %}{% endblock %}

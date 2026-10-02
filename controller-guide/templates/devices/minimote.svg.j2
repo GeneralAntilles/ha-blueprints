@@ -1,0 +1,12 @@
+{#- Aeotec Minimote, from review photos: long rounded remote, four round
+    numbered buttons in a 2x2 group at the top (1 2 / 3 4), a sliding cover
+    over the setup buttons on the lower half, status LEDs at the top end. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+<rect class="dev-line" x="34" y="6" width="52" height="178" rx="22"/>
+<circle class="dev-fill" cx="56" cy="17" r="1"/><circle class="dev-fill" cx="64" cy="17" r="1"/>
+<circle class="dev-line" cx="50" cy="40" r="10"/><circle class="dev-line" cx="70" cy="40" r="10"/>
+<circle class="dev-line" cx="50" cy="63" r="10"/><circle class="dev-line" cx="70" cy="63" r="10"/>
+<path class="dev-line" d="M34 92 H86"/>
+<path class="dev-line faint" d="M40 98 H80"/>
+{{ k.badge(c, "b1", 50, 40, 8) }}{{ k.badge(c, "b2", 70, 40, 8) }}{{ k.badge(c, "b3", 50, 63, 8) }}{{ k.badge(c, "b4", 70, 63, 8) }}
+</svg>

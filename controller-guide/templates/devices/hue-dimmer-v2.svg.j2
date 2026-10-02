@@ -1,0 +1,14 @@
+{#- Hue dimmer switch v2 (RWL022), from the Zigbee2MQTT photo: rounder
+    remote on a wall plate; power button with an LED dash under it, one
+    brighter/dimmer rocker with no divider, a tall "hue" button at the
+    bottom. Badges sit beside it. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.hueplate() }}
+<rect class="dev-line" x="40" y="34" width="40" height="126" rx="9"/>
+<path class="dev-line thin" d="M40 72 H80 M40 118 H80"/>
+<path class="dev-line thin" d="M56.5 49 A5 5 0 1 0 63.5 49 M60 45 V52"/>
+<line class="dev-line thin" x1="57" y1="66" x2="63" y2="66"/>
+{{ k.sun(60, 86, 2.4) }}{{ k.sun(60, 105, 1.5) }}
+<text class="dev-label" x="60" y="142" text-anchor="middle">hue</text>
+{{ k.badge(c, "b1", 95, 53, 7.5) }}{{ k.badge(c, "b2", 95, 84, 7.5) }}{{ k.badge(c, "b3", 95, 105, 7.5) }}{{ k.badge(c, "b4", 95, 139, 7.5) }}
+</svg>

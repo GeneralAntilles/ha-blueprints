@@ -1,0 +1,8 @@
+{#- GE / Jasco 14294: full-height paddle, small LED at the bottom. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.wallplate() }}
+<rect class="dev-line" x="37" y="36" width="46" height="110" rx="2"/>
+<line class="dev-line faint" x1="39" y1="91" x2="81" y2="91"/>
+<circle class="dev-fill" cx="60" cy="151" r="1.4"/>
+{{ k.badge(c, "up", 60, 63) }}{{ k.badge(c, "down", 60, 119) }}
+</svg>

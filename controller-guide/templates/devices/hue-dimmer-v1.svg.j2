@@ -1,0 +1,12 @@
+{#- Hue dimmer switch v1 (RWL020 US / RWL021), from the Wikimedia and
+    Zigbee2MQTT photos: remote on a wall plate, four stacked buttons with no
+    gaps: ON (tall), brighter, dimmer, OFF (tall). Badges sit beside it. -#}
+{% import "devices/_kit.svg.j2" as k %}{{ k.svg_open(c) }}
+{{ k.hueplate() }}
+<rect class="dev-line" x="40" y="26" width="40" height="136" rx="5"/>
+<path class="dev-line thin" d="M40 62 H80 M40 92 H80 M40 124 H80"/>
+<text class="dev-label" x="60" y="47" text-anchor="middle">ON</text>
+<text class="dev-label" x="60" y="146" text-anchor="middle">OFF</text>
+{{ k.sun(60, 77, 2.6) }}{{ k.sun(60, 108, 1.6) }}
+{{ k.badge(c, "b1", 95, 44, 7.5) }}{{ k.badge(c, "b2", 95, 77, 7.5) }}{{ k.badge(c, "b3", 95, 108, 7.5) }}{{ k.badge(c, "b4", 95, 143, 7.5) }}
+</svg>

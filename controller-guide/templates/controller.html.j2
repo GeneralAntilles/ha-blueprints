@@ -1,0 +1,54 @@
+{% extends "base.html.j2" %}
+{% from "partials/legend.html.j2" import control_block, drawing, led_section %}
+{% block main %}
+<article class="sheet">
+  <header class="sheet-head">
+    <p class="crumb"><a href="{{ '../index.html' | v }}">All controllers</a></p>
+    <h1>{{ c.title }}</h1>
+    <p class="where">{{ c.location }}{% if c.device_names | length > 1 %}. Same buttons on: {{ c.device_names | join(', ') }}{% endif %}</p>
+    {% if c.disabled %}<p class="flag">This controller's automation is switched off in Home Assistant.</p>{% endif %}
+  </header>
+
+  <div class="sheet-body">
+    <figure class="sheet-art">{{ drawing(c) }}</figure>
+    <div class="controls">
+    {% for control in c.controls %}{{ control_block(control, 3, true, "h2") }}{% endfor %}
+    </div>
+  </div>
+
+  {{ led_section(c) }}
+
+  {% if c.notes %}
+  <section class="notes" aria-labelledby="notes-h">
+    <h2 id="notes-h">Good to know</h2>
+    <ul>{% for n in c.notes %}<li>{{ n }}</li>{% endfor %}</ul>
+  </section>
+  {% endif %}
+
+  <p class="actions">
+    <a class="button" href="{{ ('../print/letter.html?only=' ~ c.slug) | v }}">Print full sheet</a>
+    <a class="button quiet" href="{{ ('../print/card.html?only=' ~ c.slug) | v }}">Print 6 × 4 card</a>
+    <a class="button quiet" href="{{ ('../print/mini.html?only=' ~ c.slug) | v }}">Print mini label</a>
+  </p>
+
+  <details class="tech">
+    <summary>Technical details</summary>
+    <dl>
+      <dt>Model</dt><dd>{{ c.model or "Unknown" }}</dd>
+      <dt>Devices</dt><dd>{{ c.device_names | join(', ') }}</dd>
+      <dt>Automations</dt><dd>{{ c.automation_ids | join(', ') or "None" }}</dd>
+      <dt>Card revision</dt><dd>{{ c.rev }}</dd>
+      <dt>Printed card</dt><dd>{% if printed[c.slug] is defined %}{{ printed[c.slug].date }}, revision {{ printed[c.slug].rev }}{% if printed[c.slug].stale %} <span class="flag">Out of date: reprint</span>{% endif %}{% else %}None on record{% endif %}</dd>
+      {% for label, value in c.led_raw %}<dt>{{ label }}</dt><dd>{{ value }}</dd>{% endfor %}
+    </dl>
+    <table class="sigs">
+      <thead><tr><th scope="col">Control</th><th scope="col">Gesture</th><th scope="col">Action</th></tr></thead>
+      <tbody>
+      {% for control in c.controls %}{% for g in control.gestures %}
+        <tr{% if g.broken %} class="broken"{% endif %}><td>{{ control.badge }}</td><td>{{ g.kind }}</td><td><code>{{ g.detail or '—' }}</code></td></tr>
+      {% endfor %}{% endfor %}
+      </tbody>
+    </table>
+  </details>
+</article>
+{% endblock %}
