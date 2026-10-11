@@ -2,7 +2,7 @@
 # /Volumes/config/templates.yaml -- edit here, then re-sync that block.
 # Plan + review notes: ~/.claude/plans/comfort-window-advisor.md
 #
-#   sensor.window_forecast          next 12 met.no hours with dew point
+#   sensor.window_forecast          next 12 hours (NBM, met.no fallback) with dew point
 #   sensor.window_advice            "Good" | blocking reason | "Blind: ..."
 #   sensor.window_advice_trace      the whole ladder, for the Logic tab
 #   binary_sensor.window_weather_good   debounced Good (20 min on / 10 min off)
@@ -11,9 +11,16 @@
 # window_advice switches from "enter" to "stay" thresholds once
 # window_weather_good is on (hysteresis), so open/close advice doesn't flap.
 
-# Hourly forecast, refreshed every 30 min. On a failed fetch the previous
-# hours and fetched_at are kept; window_advice goes Blind once they are
-# older than 90 min, so a dead weather integration never reads as "dry".
+# Hourly forecast, refreshed every 30 min. Primary source is NOAA's
+# National Blend of Models via Open-Meteo (rest_command.window_forecast_nbm,
+# defined in configuration.yaml; reference copy in window-forecast-nbm.yaml):
+# station-calibrated, and on 2026-10-08 it matched the backyard station within
+# 0.6 degrees where met.no was 10 degrees low. met.no is the fallback
+# (parsed only when NBM gave < 3 hours). Every hour's precip is the total
+# for the hour that STARTS at t (met.no's convention; NBM's is shifted). On a
+# failed fetch from both, the previous hours and fetched_at are kept;
+# window_advice goes Blind once they are older than 90 min, so a dead
+# forecast never reads as "dry".
 - trigger:
     - trigger: time_pattern
       minutes: /30
@@ -25,6 +32,9 @@
       entity_id: weather.forecast_home
       from: unavailable
   action:
+    - action: rest_command.window_forecast_nbm
+      response_variable: nbm
+      continue_on_error: true
     - action: weather.get_forecasts
       target:
         entity_id: weather.forecast_home
@@ -32,27 +42,39 @@
         type: hourly
       response_variable: fc
       continue_on_error: true
-  sensor:
-    - unique_id: window_forecast
-      name: Window Forecast
-      icon: mdi:weather-cloudy-clock
-      state: >-
-        {% set ok = fc is defined and fc is mapping
-           and fc.get('weather.forecast_home') is mapping %}
-        {{ fc['weather.forecast_home'].forecast | length if ok
-           else this.state | int(0) }}
-      attributes:
-        fetched_at: >-
-          {% set ok = fc is defined and fc is mapping
-             and fc.get('weather.forecast_home') is mapping %}
-          {{ now().isoformat() if ok else this.attributes.get('fetched_at') }}
-        hours: >-
-          {% set ok = fc is defined and fc is mapping
-             and fc.get('weather.forecast_home') is mapping %}
-          {% if ok %}
-            {% set ns = namespace(out=[]) %}
-            {% for h in fc['weather.forecast_home'].forecast[:12]
-               if h.temperature is number and h.humidity is number
+    # Parsed once here so the state, hours and source can't disagree.
+    - variables:
+        nbm_hours: >-
+          {% set ns = namespace(out=[]) %}
+          {% set n = nbm.content.hourly if nbm is defined and nbm is mapping
+               and nbm.get('status') == 200 and nbm.content is mapping
+               and nbm.content.hourly is mapping else none %}
+          {% if n is not none and n.time is list and n.temperature_2m is list
+             and n.dew_point_2m is list %}
+            {% for ts in n.time[:12] %}
+              {% set i = loop.index0 %}
+              {% set t = n.temperature_2m[i] if i < n.temperature_2m | length else none %}
+              {% set d = n.dew_point_2m[i] if i < n.dew_point_2m | length else none %}
+              {#- NBM precip at hour i+1 is the total for hour i..i+1. -#}
+              {% set p = n.precipitation[i + 1] if n.precipitation is list
+                   and i + 1 < n.precipitation | length else none %}
+              {% if ts is number and t is number and d is number %}
+                {% set ns.out = ns.out + [{
+                     't': as_datetime(ts).isoformat(),
+                     'temp': t | round(1), 'dp': d | round(1),
+                     'precip': p if p is number else none }] %}
+              {% endif %}
+            {% endfor %}
+          {% endif %}
+          {{ ns.out }}
+        met_hours: >-
+          {% set ns = namespace(out=[]) %}
+          {% set m = fc.get('weather.forecast_home') if fc is defined
+               and fc is mapping else none %}
+          {% if nbm_hours | length < 3 and m is mapping and m.get('forecast') is list %}
+            {% for h in m.forecast[:12]
+               if h is mapping and h.get('datetime') is string
+               and h.get('temperature') is number and h.get('humidity') is number
                and h.humidity > 0 %}
               {% set tc = (h.temperature - 32) * 5 / 9 %}
               {% set g = log(h.humidity / 100) + 17.27 * tc / (237.3 + tc) %}
@@ -60,12 +82,28 @@
                    't': h.datetime,
                    'temp': h.temperature,
                    'dp': ((237.3 * g / (17.27 - g)) * 9 / 5 + 32) | round(1),
-                   'precip': h.precipitation }] %}
+                   'precip': h.get('precipitation') }] %}
             {% endfor %}
-            {{ ns.out }}
-          {% else %}
-            {{ this.attributes.get('hours', []) }}
           {% endif %}
+          {{ ns.out }}
+        src: >-
+          {{ 'nbm' if nbm_hours | length >= 3
+             else ('met.no' if met_hours | length >= 3 else none) }}
+  sensor:
+    - unique_id: window_forecast
+      name: Window Forecast
+      icon: mdi:weather-cloudy-clock
+      state: >-
+        {% set h = nbm_hours if src == 'nbm' else met_hours %}
+        {{ h | length if src else this.state | int(0) }}
+      attributes:
+        source: "{{ src if src else this.attributes.get('source') }}"
+        fetched_at: >-
+          {{ now().isoformat() if src else this.attributes.get('fetched_at') }}
+        hours: >-
+          {% if src == 'nbm' %}{{ nbm_hours }}
+          {% elif src == 'met.no' %}{{ met_hours }}
+          {% else %}{{ this.attributes.get('hours', []) }}{% endif %}
 
 - sensor:
     - unique_id: window_advice
@@ -82,21 +120,26 @@
         summary: >-
           {% macro f(e) %}{{ (states(e) | float | round(0) | int) if is_number(states(e)) else '?' }}{% endmacro %}
           Outside {{ f('sensor.outdoor_temperature') }}°F, dew point {{ f('sensor.outdoor_dewpoint') }}°F · inside {{ f('sensor.indoor_temperature') }}°F, dew point {{ f('sensor.indoor_dew_point') }}°F
-        # First forecast hour that breaks the "stay open" thresholds; none =
-        # nothing bad in the next 12 hours.
+        # First projected point (station reading + forecast trend) that
+        # breaks the "stay open" thresholds; none = nothing in 12 hours.
+        # Both read from the trace sensor's single full decide() render
+        # (rendering it again here would double the cost per update).
         good_until: >-
-          {% set hours = state_attr('sensor.window_forecast', 'hours') %}
-          {% set it = states('sensor.indoor_temperature') | float(72) %}
-          {% set ns = namespace(t=none) %}
-          {% if hours is list %}
-            {% for h in hours if as_timestamp(h.t, 0) >= as_timestamp(now()) - 3600 %}
-              {% if ns.t is none and (h.temp < 52 or (h.temp > it + 1 and h.temp > 74)
-                    or h.dp > 60 or (h.precip is number and h.precip > 0)) %}
-                {% set ns.t = h.t %}
-              {% endif %}
-            {% endfor %}
-          {% endif %}
-          {{ ns.t }}
+          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
+          {{ d.good_until if d is mapping else none }}
+        # While blocked: first future hour that would pass every "open"
+        # threshold and hold for 2 h after; none = not within 12 hours.
+        opens_around: >-
+          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
+          {{ d.opens_around if d is mapping else none }}
+        # Next 2 h hold the stay-open limits (none = unknown); the "open"
+        # push requires it, since that push can also fire in stay mode.
+        outlook_ok: >-
+          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
+          {{ d.outlook_ok if d is mapping else none }}
+        forecast_through: >-
+          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
+          {{ d.forecast_through if d is mapping else none }}
 
     # Every gate of the ladder with its live value and both thresholds, for
     # the Logic tab (logic-view/logic-trace-card.js). Recorder-excluded by
@@ -113,7 +156,7 @@
           {% from 'window_advisor.jinja' import window_advice %}
           {{ window_advice() | from_json }}
         summary: "{{ state_attr('sensor.window_advice', 'summary') }}"
-        good_until: "{{ state_attr('sensor.window_advice', 'good_until') }}"
+        source: "{{ state_attr('sensor.window_forecast', 'source') }}"
         hours: >-
           {% set hours = state_attr('sensor.window_forecast', 'hours') %}
           {{ (hours | selectattr('t', 'defined') | list)[:12] if hours is list else [] }}
@@ -160,8 +203,7 @@
           {%- else %}none{% endif %}
 
     # House too hot, too cold or too muggy for 15 min. Only acted on while
-    # Windows Open is on (the AC is off then), as the safety net for a
-    # forgotten switch.
+    # Windows Open is on, as the safety net for forgotten open windows.
     - unique_id: window_indoor_extreme
       name: Window Indoor Extreme
       icon: mdi:home-thermometer

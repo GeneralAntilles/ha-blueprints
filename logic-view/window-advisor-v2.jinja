@@ -1,0 +1,330 @@
+{#- Window advisor decision ladder (2026-09-30; v2 2026-10-08: enthalpy gate,
+    forecast used as a trend anchored on the station, outlook gate,
+    good_until / opens_around). Plan: ~/.claude/plans/window-advisor-v2.md. Deployed to
+    /config/custom_templates/window_advisor.jinja; used by sensor.window_advice
+    (state) and sensor.window_advice_trace (the Logic tab's view of it), so the
+    view can never disagree with the decision.
+
+    decide() is pure: every input is passed in, which is what lets the replay
+    test in logic-view/ feed it synthetic weather. It returns JSON:
+      state    "Good" | first blocking reason | "Blind: ..."
+      mode     "open" (strict, window_weather_good off) | "stay" (relaxed)
+      decided  index of the gate that decided (-1 = Good or Blind)
+      gates    every check in ladder order, evaluated even past the deciding
+               one: q (question), fail (true/false/null = no data), reason,
+               short (terse label for the card's "also blocking" list),
+               v + unit (value), t (active threshold), t_alt (other mode's),
+               cmp (">": fail when v > t), lo/hi (number-line range),
+               vs/vs_label/rule/rule_alt for thresholds that move with indoors
+      proj     corrected forecast: [{t, temp, dp, precip}], first point = now
+               (station reading), then every forecast hour after now shifted
+               by bias = station now − forecast interpolated to now
+      trend    {temp_2h, dp_2h, bias_temp, bias_dp} (projected Δ over 2 h)
+      good_until   while Good: first proj point breaking the stay thresholds
+                   (none = nothing modeled before forecast_through)
+      outlook_ok   next 2 h hold the stay thresholds (any mode; none = unknown)
+      opens_around first future proj hour passing every open threshold (indoor
+                   and hazards held as now), dry, with the next 2 h holding (none = not within 12 h, or Good)
+    Indoor values are held at their current reading in every projection.
+    Thresholds are [open, stay]; stay is looser so advice doesn't flap. -#}
+
+{%- macro r(x) -%}{{ x | round(0) | int }}{%- endmacro -%}
+
+{#- Moist-air enthalpy, BTU per lb of dry air, from °F temperature and dew
+    point (sea-level pressure; both sides of a comparison share the error). -#}
+{%- macro enth(t, dp) -%}
+  {%- set c = (dp - 32) * 5 / 9 -%}
+  {%- set pv = 6.112 * e ** (17.67 * c / (c + 243.5)) -%}
+  {%- set w = 0.622 * pv / (1013.25 - pv) -%}
+  {{- 0.240 * t + w * (1061 + 0.444 * t) -}}
+{%- endmacro -%}
+
+{#- Forecast [temp, dp] at timestamp ts, linear between hourly points
+    ([ts, temp, dp, precip, t]); before the first point uses the first,
+    past the last holds it for an hour, otherwise none. -#}
+{%- macro fc_at(pts, ts) -%}
+  {%- set ns = namespace(a=none, b=none) -%}
+  {%- for p in pts -%}
+    {%- if p[0] <= ts -%}{%- set ns.a = p -%}
+    {%- elif ns.b is none -%}{%- set ns.b = p -%}{%- endif -%}
+  {%- endfor -%}
+  {%- if ns.a is not none and ns.b is not none -%}
+    {%- set f = (ts - ns.a[0]) / (ns.b[0] - ns.a[0]) -%}
+    {{- [ns.a[1] + f * (ns.b[1] - ns.a[1]), ns.a[2] + f * (ns.b[2] - ns.a[2])] | to_json -}}
+  {%- elif ns.a is not none and ts - ns.a[0] <= 3600 -%}{{- [ns.a[1], ns.a[2]] | to_json -}}
+  {%- elif ns.b is not none and ns.a is none -%}{{- [ns.b[1], ns.b[2]] | to_json -}}
+  {%- else -%}null{%- endif -%}
+{%- endmacro -%}
+
+{#- Rain intervals ([start_ts, precip or none, t], each the hour starting
+    at t) overlapping [a, b): the amounts, how many are known and wet. -#}
+{%- macro rain_in(rain, a, b) -%}
+  {%- set ns = namespace(p=[], t=[]) -%}
+  {%- for x in rain if x[0] + 3600 > a and x[0] < b -%}
+    {%- set ns.p = ns.p + [x[1]] -%}{%- set ns.t = ns.t + [x[2]] -%}
+  {%- endfor -%}
+  {%- set known = ns.p | select('number') | list -%}
+  {{- {'p': ns.p, 't': ns.t, 'n': ns.p | length, 'known': known | length,
+       'wet': known | select('>', 0) | list | length} | to_json -}}
+{%- endmacro -%}
+
+{#- 'yes' when every interval overlapping [a, b) is known and dry. -#}
+{%- macro rain_dry(rain, a, b) -%}
+  {%- set w = rain_in(rain, a, b) | from_json -%}
+  {{- 'yes' if w.n > 0 and w.known == w.n and w.wet == 0 else 'no' -}}
+{%- endmacro -%}
+
+{#- First stay threshold a projected point breaks ('' = holds). Warm is
+    "over 74" alone: the live stay rule is over max(inside + 1, 74), but
+    opening cools the house, so holding today's inside temperature would be
+    optimistic; 74 is where that rule ends up once the house has cooled. -#}
+{%- macro breaks_stay(t, dp, h_in) -%}
+  {%- if t < 52 -%}too cold
+  {%- elif t > 74 -%}too warm
+  {%- elif dp > 60 -%}too humid
+  {%- elif enth(t, dp) | float > h_in + 0.5 -%}muggier than inside
+  {%- endif -%}
+{%- endmacro -%}
+
+{%- macro decide(raw, hours, fetched, now_ts, stay, raining_recently) -%}
+  {%- set fetched_ts = as_timestamp(fetched, none) if fetched else none -%}
+  {#- Only the current and future hours count: during a fetch outage the
+      cached list ages, and past dry hours must not hide upcoming rain. -#}
+  {%- set ns_h = namespace(h=[]) -%}
+  {%- if hours is list -%}
+    {%- for h in hours if h is mapping and as_timestamp(h.t, 0) >= now_ts - 3600 -%}
+      {%- set ns_h.h = ns_h.h + [h] -%}
+    {%- endfor -%}
+    {%- set hours = ns_h.h -%}
+  {%- endif -%}
+  {%- set age_min = ((now_ts - fetched_ts) / 60) if fetched_ts is number else 9999 -%}
+  {%- set missing = raw.items() | rejectattr('1', 'is_number') | map(attribute='0') | list -%}
+  {%- set stale = hours is not list or hours | length < 3 or age_min > 90 -%}
+  {%- set i = 1 if stay else 0 -%}
+  {%- set win = [3, 2][i] -%}
+  {#- Rain, kept apart from the temperature points so an hour missing its
+      dew point still counts. An hour missing its precip key becomes none
+      (unknown), never Undefined; map(default=none) doesn't work: Jinja
+      treats a None default as unset. -#}
+  {%- set ns_r = namespace(r=[]) -%}
+  {%- if hours is list -%}
+    {%- for h in hours if as_timestamp(h.t, none) is number -%}
+      {%- set ns_r.r = ns_r.r + [[as_timestamp(h.t), h.precip if h.precip is defined
+           and h.precip is number else none, h.t]] -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {%- set rain = ns_r.r -%}
+  {#- Forecast gate: every interval overlapping the next win hours. -#}
+  {%- set fw = rain_in(rain, now_ts, now_ts + 3600 * win) | from_json -%}
+  {%- set soon_hours = fw.p -%}
+  {%- set ot = raw.ot | float if raw.ot is is_number else none -%}
+  {%- set odp = raw.odp | float if raw.odp is is_number else none -%}
+  {%- set it = raw.it | float if raw.it is is_number else none -%}
+  {%- set idp = raw.idp | float if raw.idp is is_number else none -%}
+  {%- set irh = raw.irh | float if raw.irh is is_number else none -%}
+  {%- set pm = raw.pm | float if raw.pm is is_number else none -%}
+  {%- set rr = raw.rr | float if raw.rr is is_number else none -%}
+  {%- set gust = raw.gust | float if raw.gust is is_number else none -%}
+  {%- set have = namespace(ot=ot is number, odp=odp is number, it=it is number,
+                           idp=idp is number, irh=irh is number, pm=pm is number,
+                           rr=rr is number, gust=gust is number) -%}
+  {%- set warm_t = [it - 2, [it + 1, 74] | max] if have.it else [none, none] -%}
+  {%- set h_out = enth(ot, odp) | float if have.ot and have.odp else none -%}
+  {%- set h_in = enth(it, idp) | float if have.it and have.idp else none -%}
+  {%- set enth_t = [h_in - 0.5, h_in + 0.5] if h_in is number else [none, none] -%}
+
+  {#- Projection: the forecast's shape, anchored on the station's reading. -#}
+  {%- set ns_f = namespace(pts=[]) -%}
+  {%- if hours is list -%}
+    {%- for h in hours if h.temp is defined and h.dp is defined
+         and h.temp is number and h.dp is number -%}
+      {%- set ns_f.pts = ns_f.pts + [[as_timestamp(h.t, 0), h.temp, h.dp,
+           h.precip if h.precip is defined and h.precip is number else none, h.t]] -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {%- set pts = ns_f.pts -%}
+  {%- set base = fc_at(pts, now_ts) | from_json if pts | length >= 2 else none -%}
+  {#- The outlook needs real forecast coverage through now + 2 h. -#}
+  {%- set can_proj = base is not none and have.ot and have.odp
+       and pts[-1][0] >= now_ts + 7200 -%}
+  {%- set bias = [ot - base[0], odp - base[1]] if can_proj else [none, none] -%}
+  {#- Corrected point at ts; dew point can't exceed temperature. -#}
+  {%- set ns_q = namespace(q1=none, q2=none, win=[], proj=[]) -%}
+  {%- if can_proj -%}
+    {%- for x in [1, 2] -%}
+      {%- set f = fc_at(pts, now_ts + 3600 * x) | from_json -%}
+      {%- if f is not none -%}
+        {%- set q = [f[0] + bias[0], [f[1] + bias[1], f[0] + bias[0]] | min] -%}
+        {%- if x == 1 -%}{%- set ns_q.q1 = q -%}{%- else -%}{%- set ns_q.q2 = q -%}{%- endif -%}
+      {%- endif -%}
+    {%- endfor -%}
+    {%- set cur = pts | selectattr('0', 'le', now_ts) | list -%}
+    {%- set ns_q.proj = [{'t': (now_ts | as_datetime).isoformat(), 'temp': ot, 'dp': odp,
+         'precip': cur[-1][3] if cur | length > 0 else none}] -%}
+    {#- Outlook window: forecast hours inside (now, now + 2 h] plus the
+        interpolated +1 h / +2 h points; the projection is linear between
+        hours, so these cover every value in the window. -#}
+    {%- for p in pts if p[0] > now_ts and p[0] <= now_ts + 7200 -%}
+      {%- set pt = p[1] + bias[0] -%}
+      {%- set ns_q.win = ns_q.win + [[pt, [p[2] + bias[1], pt] | min]] -%}
+    {%- endfor -%}
+    {%- for p in pts if p[0] > now_ts -%}
+      {%- set pt = (p[1] + bias[0]) | round(1) -%}
+      {%- set ns_q.proj = ns_q.proj + [{'t': p[4], 'temp': pt,
+           'dp': [(p[2] + bias[1]) | round(1), pt] | min, 'precip': p[3]}] -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {%- set proj = ns_q.proj -%}
+  {%- set q2 = ns_q.q2 -%}
+  {%- set trend = {'temp_2h': (q2[0] - ot) | round(1) if q2 is not none else none,
+                   'dp_2h': (q2[1] - odp) | round(1) if q2 is not none else none,
+                   'bias_temp': bias[0] | round(1) if can_proj else none,
+                   'bias_dp': bias[1] | round(1) if can_proj else none} -%}
+
+  {#- Outlook: will the next 2 h still pass the stay thresholds? Computed in
+      both modes (outlook_ok gates the "open" push, which can also fire in
+      stay mode), but it only blocks the advice in open mode; once open,
+      good_until carries the heads-up. Indoor readings are held fixed, so
+      this is a conditional estimate, not a guaranteed duration. -#}
+  {%- set ns_o = namespace(why='', ok=can_proj and h_in is number
+                           and ns_q.q1 is not none and ns_q.q2 is not none) -%}
+  {%- set ow = rain_in(rain, now_ts, now_ts + 7200) | from_json -%}
+  {%- if ns_o.ok -%}
+    {%- for q in [ns_q.q1] + ns_q.win + [ns_q.q2] -%}
+      {%- set why = breaks_stay(q[0], q[1], h_in) -%}
+      {%- if ns_o.why == '' and why != '' -%}{%- set ns_o.why = why -%}{%- endif -%}
+    {%- endfor -%}
+    {%- if ns_o.why == '' and ow.wet > 0 -%}{%- set ns_o.why = 'rain' -%}{%- endif -%}
+  {%- endif -%}
+  {%- set gates = [
+    {'k': 'rain', 'short': 'Raining', 'q': 'Not raining', 'unit': 'in/h', 'v': rr, 't': 0, 't_alt': 0, 'cmp': '>',
+     'lo': 0, 'hi': 0.3, 'extra': 'rained in last 30 min' if raining_recently else none,
+     'fail': ((rr > 0) or raining_recently) if have.rr else (true if raining_recently else none),
+     'reason': 'Raining'},
+    {'k': 'gust', 'short': 'Too gusty', 'q': 'Calm enough', 'unit': 'mph', 'v': gust, 't': 25, 't_alt': 25, 'cmp': '>=',
+     'lo': 0, 'hi': 40, 'fail': (gust >= 25) if have.gust else none,
+     'reason': 'Too gusty (' ~ r(gust) ~ ' mph gusts)' if have.gust else ''},
+    {'k': 'pm', 'short': 'Smoky or dusty', 'q': 'Clean air outside', 'unit': 'µg/m³ PM2.5', 'v': pm, 't': [20, 35][i], 't_alt': [20, 35][1 - i],
+     'cmp': '>', 'lo': 0, 'hi': 60, 'fail': (pm > [20, 35][i]) if have.pm else none,
+     'reason': 'Outdoor air is dusty or smoky (PM2.5 ' ~ r(pm) ~ ')' if have.pm else ''},
+    {'k': 'forecast', 'short': 'Rain in the next ' ~ win ~ ' h', 'q': 'Dry next ' ~ win ~ ' hours', 'unit': 'wet hours', 'v': fw.wet,
+     't': 0, 't_alt': 0, 'cmp': '>', 'lo': 0, 'hi': 3, 'hours': soon_hours, 'hour_t': fw.t,
+     'fail': (fw.wet > 0) if not stale and fw.known > 0 else none, 'reason': 'Rain in the forecast'},
+    {'k': 'warm', 'short': 'Too warm outside', 'q': 'Cooler outside', 'unit': '°F out', 'v': ot, 't': warm_t[i], 't_alt': warm_t[1 - i],
+     'cmp': '>', 'lo': 40, 'hi': 100, 'vs': it, 'vs_label': 'inside',
+     'rule': ['inside − 2°', 'inside + 1°, over 74°'][i],
+     'rule_alt': ['inside − 2°', 'inside + 1°, over 74°'][1 - i],
+     'fail': ((ot > it + 1 and ot > 74) if stay else (ot > it - 2)) if have.ot and have.it else none,
+     'reason': "Outside (" ~ r(ot) ~ "°F) isn't cooler than inside (" ~ r(it) ~ "°F)" if have.ot and have.it else ''},
+    {'k': 'cold', 'short': 'Too cold outside', 'q': 'Not too cold', 'unit': '°F out', 'v': ot, 't': [55, 52][i], 't_alt': [55, 52][1 - i],
+     'cmp': '<', 'lo': 40, 'hi': 100, 'fail': (ot < [55, 52][i]) if have.ot else none,
+     'reason': 'Too cold outside (' ~ r(ot) ~ '°F)' if have.ot else ''},
+    {'k': 'house', 'short': 'House already cool', 'q': 'House needs cooling', 'unit': '°F in', 'v': it, 't': [68, 66][i], 't_alt': [68, 66][1 - i],
+     'cmp': '<', 'lo': 55, 'hi': 85, 'fail': (it < [68, 66][i]) if have.it else none,
+     'reason': 'House is already cool (' ~ r(it) ~ '°F)' if have.it else ''},
+    {'k': 'humid', 'short': 'Too humid outside', 'q': 'Dry enough outside', 'unit': '°F dew pt out', 'v': odp, 't': [58, 60][i], 't_alt': [58, 60][1 - i],
+     'cmp': '>', 'lo': 30, 'hi': 80, 'fail': (odp > [58, 60][i]) if have.odp else none,
+     'reason': 'Too humid outside (dew point ' ~ r(odp) ~ '°F)' if have.odp else ''},
+    {'k': 'enthalpy', 'short': ['Too little cooling benefit', 'Too much total heat'][i], 'q': 'Less total heat',
+     'unit': 'BTU/lb out', 'v': h_out | round(1) if h_out is number else none,
+     't': enth_t[i] | round(1) if h_in is number else none, 't_alt': enth_t[1 - i] | round(1) if h_in is number else none,
+     'cmp': '>', 'lo': 20, 'hi': 40, 'vs': h_in | round(1) if h_in is number else none, 'vs_label': 'inside',
+     'rule': ['inside − 0.5', 'inside + 0.5'][i], 'rule_alt': ['inside − 0.5', 'inside + 0.5'][1 - i],
+     'fail': (h_out > enth_t[i]) if h_out is number and h_in is number else none,
+     'reason': ['Outside air offers too little cooling benefit', 'Outside air has too much total heat'][i]},
+    {'k': 'rh', 'short': 'Humid inside', 'q': 'Indoor humidity OK', 'unit': '% RH in', 'v': irh, 't': [60, 65][i], 't_alt': [60, 65][1 - i],
+     'cmp': '>', 'lo': 30, 'hi': 90, 'fail': (irh > [60, 65][i]) if have.irh else none,
+     'reason': 'Indoor humidity is high (' ~ r(irh) ~ '%)' if have.irh else ''},
+    {'k': 'outlook', 'short': ('Won\'t last: ' ~ ns_o.why) if ns_o.why else 'Won\'t last 2 h',
+     'q': 'Holds for the next 2 hours', 'unit': '', 'v': none, 't': none, 't_alt': none,
+     'note': ('only blocks before opening' ~ (' · would fail: ' ~ ns_o.why if ns_o.why else '')) if stay
+             else 'projected outside air vs the stay-open limits',
+     'extra': ('next 2 h: outside ' ~ ('%+.0f' | format(trend.temp_2h)) ~ '°, dew pt '
+               ~ ('%+.0f' | format(trend.dp_2h)) ~ '°') if trend.temp_2h is number else none,
+     'fail': false if stay else ((ns_o.why != '') if ns_o.ok else none),
+     'reason': "Won't last: " ~ ns_o.why ~ ' within 2 h' if ns_o.why else ''},
+  ] -%}
+  {%- set first = namespace(i=-1) -%}
+  {%- for g in gates -%}
+    {%- if first.i < 0 and g.fail -%}{%- set first.i = loop.index0 -%}{%- endif -%}
+  {%- endfor -%}
+  {%- if missing | length > 0 -%}
+    {%- set state = 'Blind: no data from ' ~ missing | join(', ') -%}
+    {%- set first.i = -1 -%}
+  {%- elif stale -%}
+    {%- set state = 'Blind: forecast is stale' -%}
+    {%- set first.i = -1 -%}
+  {%- elif not can_proj -%}
+    {%- set state = 'Blind: forecast projection unavailable' -%}
+    {%- set first.i = -1 -%}
+  {%- elif fw.known == 0 -%}
+    {%- set state = 'Blind: forecast has no rain data' -%}
+    {%- set first.i = -1 -%}
+  {%- elif first.i >= 0 -%}
+    {%- set state = gates[first.i].reason -%}
+  {%- else -%}
+    {%- set state = 'Good' -%}
+  {%- endif -%}
+  {#- good_until: while Good, the earliest of the first future projected
+      hour that breaks the stay thresholds and the first wet interval
+      starting after now. Never the synthetic "now" point, so it's an hour
+      string and doesn't change on every render. -#}
+  {%- set ns_u = namespace(ts=none, t=none) -%}
+  {%- if state == 'Good' and h_in is number -%}
+    {%- for q in proj[1:] if ns_u.t is none and breaks_stay(q.temp, q.dp, h_in) != '' -%}
+      {%- set ns_u.t = q.t -%}{%- set ns_u.ts = as_timestamp(q.t) -%}
+    {%- endfor -%}
+    {%- for x in rain if x[0] > now_ts and x[1] is number and x[1] > 0
+          and (ns_u.ts is none or x[0] < ns_u.ts) -%}
+      {%- if loop.first -%}{%- set ns_u.t = x[2] -%}{%- set ns_u.ts = x[0] -%}{%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {#- opens_around: while blocked by something the weather could fix (not
+      a live hazard, not Blind), the first future hour passing every open
+      threshold (held-current indoor and PM against the open limits), with
+      the next 3 h known dry and the two hours after it holding. -#}
+  {%- set ns_a = namespace(t=none) -%}
+  {%- set hazard_now = gates[:3] | selectattr('fail') | list | length > 0 -%}
+  {%- if state != 'Good' and not state.startswith('Blind') and not hazard_now
+        and have.it and have.irh and have.pm and h_in is number
+        and it >= 68 and irh <= 60 and pm <= 20 -%}
+    {%- set fut = proj[1:] -%}
+    {%- for q in fut -%}
+      {%- set k = loop.index0 -%}
+      {%- set nxt = fut[k + 1:k + 3] -%}
+      {%- if ns_a.t is none and nxt | length == 2
+            and as_timestamp(nxt[1].t) - as_timestamp(q.t) <= 7200
+            and q.temp <= it - 2 and q.temp >= 55 and q.dp <= 58
+            and enth(q.temp, q.dp) | float <= h_in - 0.5
+            and rain_dry(rain, as_timestamp(q.t), as_timestamp(q.t) + 10800) == 'yes'
+            and breaks_stay(nxt[0].temp, nxt[0].dp, h_in) == ''
+            and breaks_stay(nxt[1].temp, nxt[1].dp, h_in) == '' -%}
+        {%- set ns_a.t = q.t -%}
+      {%- endif -%}
+    {%- endfor -%}
+  {%- endif -%}
+  {{- {'state': state, 'mode': ['open', 'stay'][i], 'decided': first.i,
+       'forecast_age_min': age_min | round(0) | int, 'gates': gates,
+       'proj': proj, 'trend': trend, 'indoor': {'temp': it, 'dp': idp}, 'good_until': ns_u.t,
+       'outlook_ok': (ns_o.why == '') if ns_o.ok and (ns_o.why != '' or ow.known == ow.n) else none,
+       'forecast_through': proj[-1].t if proj | length > 1 else none,
+       'opens_around': ns_a.t} | to_json -}}
+{%- endmacro -%}
+
+{#- Gathers the live inputs and decides. Entity tracking still works: the
+    states() calls run inside the calling template's render. -#}
+{%- macro window_advice() -%}
+  {%- set raw = {
+       'ot': states('sensor.outdoor_temperature'),
+       'odp': states('sensor.outdoor_dewpoint'),
+       'it': states('sensor.indoor_temperature'),
+       'idp': states('sensor.indoor_dew_point'),
+       'irh': states('sensor.indoor_humidity'),
+       'pm': states('sensor.airgradient_outdoor_pm2_5'),
+       'rr': states('sensor.weather_station_rain_rate'),
+       'gust': states('sensor.weather_station_wind_gust') } -%}
+  {{- decide(raw, state_attr('sensor.window_forecast', 'hours'),
+             state_attr('sensor.window_forecast', 'fetched_at'), as_timestamp(now()),
+             is_state('binary_sensor.window_weather_good', 'on'),
+             is_state('binary_sensor.rain_in_last_30_minutes', 'on')) -}}
+{%- endmacro -%}

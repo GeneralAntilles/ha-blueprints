@@ -43,7 +43,11 @@ targeted PM-clearing cases, 0 mismatches).
 
 `replay-window-advisor.py` checks `decide()` against the frozen pre-macro template
 (`window-advice-v1.jinja`), with HA rendering both: 1500 random cases clustered on
-every threshold, 0 mismatches. Re-run it after editing the ladder.
+every threshold, 0 mismatches. It pins v1 behaviour: since window advisor v2
+(2026-10-08: enthalpy gate, 58/60 dew point cap, station-anchored forecast trend,
+outlook gate, rain intervals) it no longer matches by design.
+`test-window-advisor-v2.py` holds the v2 unit cases (51, rendered by HA). Re-run it
+after editing the ladder.
 
 ## Trace shape (per gate)
 `k, q, fail (true/false/null), reason, v, unit, t, t_alt, cmp ('>', '>=', '<'), lo, hi`,

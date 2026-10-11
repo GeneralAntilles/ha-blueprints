@@ -1,193 +1,8 @@
-# Window advisor automations (2026-09-27). Reference copies of two
-# automations stored in /Volumes/config/automations.yaml (pushed via
+# Window advisor automations (2026-09-27). Reference copy of the
+# automation stored in /Volumes/config/automations.yaml (pushed via
 # /api/config/automation/config/<id>). Templates: window-advisor-templates.yaml.
-
-# ---------------------------------------------------------------------------
-# Keeps both ecobees OFF while input_boolean.windows_open is on, and puts
-# them back afterwards. A reconciler, not just an edge handler: it re-checks
-# on HA start, whenever a thermostat changes, and every 10 minutes, so a
-# missed command, a restart mid-way, an ecobee dropping offline, or someone
-# turning the AC back on is corrected.
-#
-# input_text.windows_open_hvac_restore holds JSON:
-#   {"climate.downstairs": "heat_cool", ..., "_closed_at": 1790542973}
-# Each thermostat is recorded the first time it is seen with a real mode
-# while windows are open (including "off") and never overwritten, so the
-# "off" this automation sets can't end up in it. After closing, an entry is
-# dropped only once that thermostat is confirmed back on (or was saved as
-# off); an unavailable thermostat keeps its entry until it returns.
-# "_closed_at" is persisted so a restart can't reset the 30-minute window
-# after which a thermostat still sitting at off is treated as the user's
-# choice (with a phone push). Empty text = nothing to restore.
-- id: climate_window_hvac_interlock
-  alias: 'Climate: Windows Open - HVAC Interlock'
-  description: >-
-    Turns both thermostats off while Windows Open is on and restores their
-    previous modes when it turns off. Re-checks on start, thermostat
-    changes and every 10 min. Source: ha-blueprints/climate/.
-  mode: queued
-  max: 25
-  triggers:
-    - trigger: state
-      entity_id: input_boolean.windows_open
-      to: ['on', 'off']
-      id: switch
-    - trigger: homeassistant
-      event: start
-      id: reconcile
-    - trigger: state
-      entity_id:
-        - climate.downstairs
-        - climate.studio_upstairs_thermostat
-      to: null
-      id: climate
-    - trigger: time_pattern
-      minutes: /10
-      id: reconcile
-  actions:
-    - variables:
-        climates:
-          - climate.downstairs
-          - climate.studio_upstairs_thermostat
-        valid_modes: ['off', 'heat', 'cool', 'heat_cool', 'auto', 'dry', 'fan_only']
-        snap_all: >-
-          {% set s = states('input_text.windows_open_hvac_restore') %}
-          {{ (s | from_json) if s.startswith('{') else {} }}
-        snap: >-
-          {{ dict(snap_all.items() | selectattr('0', 'in', climates) | list) }}
-        windows_open: "{{ is_state('input_boolean.windows_open', 'on') }}"
-        now_ts: "{{ as_timestamp(now()) | int }}"
-    - choose:
-        # ---------------- windows open: snapshot, then force off ----------
-        - conditions: "{{ windows_open }}"
-          sequence:
-            - variables:
-                new_snap: >-
-                  {% set ns = namespace(d=snap) %}
-                  {% for e in climates %}
-                    {% if e not in ns.d and states(e) in valid_modes %}
-                      {% set ns.d = dict(ns.d, **{e: states(e)}) %}
-                    {% endif %}
-                  {% endfor %}
-                  {{ ns.d }}
-            # Rewrite when entries were added, or to drop a stale _closed_at
-            # (windows re-opened before a restore finished).
-            - if: "{{ new_snap != snap_all }}"
-              then:
-                - action: input_text.set_value
-                  target:
-                    entity_id: input_text.windows_open_hvac_restore
-                  data:
-                    value: "{{ new_snap | to_json }}"
-            - variables:
-                to_turn_off: >-
-                  {{ climates | select('in', new_snap.keys() | list)
-                     | reject('is_state', ['off', 'unavailable', 'unknown']) | list }}
-            - repeat:
-                for_each: "{{ to_turn_off }}"
-                sequence:
-                  - action: climate.set_hvac_mode
-                    target:
-                      entity_id: "{{ repeat.item }}"
-                    data:
-                      hvac_mode: 'off'
-                    continue_on_error: true
-            # Someone turned a thermostat back on while windows are flagged
-            # open: say why it went off again.
-            - if: >-
-                {{ trigger.id == 'climate' and trigger.entity_id in to_turn_off
-                   and trigger.from_state is not none
-                   and trigger.from_state.state == 'off' }}
-              then:
-                - action: notify.mobile_app_iphone_13_pro
-                  data:
-                    title: 🪟 Thermostat turned back off
-                    message: >-
-                      {{ state_attr(trigger.entity_id, 'friendly_name') }} was switched on,
-                      but Windows Open is still on. Turn Windows Open off to restore the AC.
-                    data:
-                      tag: window_hvac_interlock
-                      group: windows
-                  continue_on_error: true
-        # ---------------- windows closed: restore, verify, prune ----------
-        - conditions: "{{ not windows_open and snap | length > 0 }}"
-          sequence:
-            - variables:
-                closed_at: "{{ snap_all.get('_closed_at', now_ts) | int }}"
-            - repeat:
-                for_each: "{{ snap.items() | list }}"
-                sequence:
-                  - if: >-
-                      {{ is_state(repeat.item[0], 'off') and repeat.item[1] != 'off'
-                         and repeat.item[1] in (state_attr(repeat.item[0], 'hvac_modes') or []) }}
-                    then:
-                      - action: climate.set_hvac_mode
-                        target:
-                          entity_id: "{{ repeat.item[0] }}"
-                        data:
-                          hvac_mode: "{{ repeat.item[1] }}"
-                        continue_on_error: true
-            - delay:
-                seconds: 20
-            # Still pending = offline, or still off when it shouldn't be.
-            - variables:
-                pending: >-
-                  {% set ns = namespace(d={}) %}
-                  {% for e, mode in snap.items() %}
-                    {% if states(e) in ['unavailable', 'unknown']
-                          or (is_state(e, 'off') and mode != 'off') %}
-                      {% set ns.d = dict(ns.d, **{e: mode}) %}
-                    {% endif %}
-                  {% endfor %}
-                  {{ ns.d }}
-                stuck_off: >-
-                  {{ pending.keys() | select('is_state', 'off') | list }}
-                expired: "{{ now_ts - closed_at > 1800 }}"
-            - choose:
-                - conditions: "{{ pending | length == 0 }}"
-                  sequence:
-                    - action: input_text.set_value
-                      target:
-                        entity_id: input_text.windows_open_hvac_restore
-                      data:
-                        value: ''
-                # 30 min after closing, a thermostat that is online but
-                # still off is left alone (it may be deliberate) - but say so.
-                - conditions: "{{ expired and stuck_off | length > 0 }}"
-                  sequence:
-                    - variables:
-                        keep: >-
-                          {{ dict(pending.items() | rejectattr('0', 'in', stuck_off) | list) }}
-                    - action: input_text.set_value
-                      target:
-                        entity_id: input_text.windows_open_hvac_restore
-                      data:
-                        value: >-
-                          {{ (dict(keep, _closed_at=closed_at) | to_json) if keep | length > 0 else '' }}
-                    - action: notify.mobile_app_iphone_13_pro
-                      data:
-                        title: 🪟 AC didn't come back on
-                        message: >-
-                          Windows Open was turned off {{ ((now_ts - closed_at) / 60) | int }} min ago,
-                          but {{ stuck_off | map('state_attr', 'friendly_name') | join(' and ') }}
-                          is still off. Check the thermostat.
-                        data:
-                          tag: window_hvac_interlock
-                          group: windows
-                      continue_on_error: true
-                    - action: persistent_notification.create
-                      data:
-                        notification_id: window_hvac_restore
-                        title: AC didn't come back on after closing the windows
-                        message: >-
-                          Still off: {{ stuck_off | join(', ') }}. Saved modes were
-                          {{ snap | to_json }}.
-              default:
-                - action: input_text.set_value
-                  target:
-                    entity_id: input_text.windows_open_hvac_restore
-                  data:
-                    value: "{{ dict(pending, _closed_at=closed_at) | to_json }}"
+# The HVAC interlock (thermostats off while Windows Open is on) was removed
+# 2026-10-10; Windows Open no longer touches the thermostats.
 
 # ---------------------------------------------------------------------------
 # Notifications: "good time to open", "time to close", immediate hazards
@@ -271,7 +86,12 @@
         summary: "{{ state_attr('sensor.window_advice', 'summary') }}"
         until: >-
           {% set t = state_attr('sensor.window_advice', 'good_until') %}
-          {{ ('until about ' ~ as_timestamp(t) | timestamp_custom('%-I %p')) if t else 'for the next 12+ hours' }}
+          {% set e = state_attr('sensor.window_advice', 'forecast_through') %}
+          {% set ts = as_timestamp(t, none) if t else none %}
+          {% set te = as_timestamp(e, none) if e else none %}
+          {{ ('until about ' ~ ts | timestamp_custom('%-I %p')) if ts is number
+             else (('through at least ' ~ te | timestamp_custom('%-I %p')) if te is number
+             else 'for now') }}
     # Flipping the switch (any way) clears the now-stale opposite push.
     - if: "{{ trigger.id == 'switch' }}"
       then:
@@ -340,7 +160,7 @@
               continue_on_error: true
 
         # ---------------- house too hot/cold/muggy while open -------------
-        # AC is off because of the switch; repeat every 2 h while it lasts.
+        # Repeat every 2 h while it lasts.
         - conditions: >-
             {{ is_open and extreme
                and (extreme_sent < max(extreme_since, open_since) or now_ts - extreme_sent > 7200) }}
@@ -352,10 +172,10 @@
                 timestamp: "{{ stamp }}"
             - action: notify.mobile_app_iphone_13_pro
               data:
-                title: 🌡️ Windows Open is keeping the AC off
+                title: 🌡️ Time to close the windows
                 message: >-
-                  {{ state_attr('binary_sensor.window_indoor_extreme', 'reason') }}.
-                  Close up and turn Windows Open off to bring the AC back.
+                  {{ state_attr('binary_sensor.window_indoor_extreme', 'reason') }}
+                  with the windows open.
                 data:
                   tag: window_close
                   group: windows
@@ -372,7 +192,7 @@
             - action: notify.mobile_app_iphone_13_pro
               data:
                 title: 🪟 Window advisor can't see the weather
-                message: "{{ reason }}. Windows are still flagged open and the AC is off."
+                message: "{{ reason }}. Windows are still flagged open."
                 data:
                   tag: window_close
                   group: windows
@@ -384,7 +204,7 @@
             - action: notify.mobile_app_iphone_13_pro
               data:
                 title: 🪟 Windows are flagged open
-                message: The alarm was set to Away while Windows Open is on (AC is off).
+                message: The alarm was set to Away while Windows Open is on.
                 data:
                   tag: window_close
                   group: windows
@@ -429,8 +249,11 @@
         # ---------------- good time to open -------------------------------
         # Once per good episode, only while Ryan is home and awake; an
         # overnight episode is announced at 07:00. 3 h floor between pushes.
+        # Skipped while the 2-hour outlook fails (in stay mode the advice
+        # itself doesn't check it).
         - conditions: >-
             {{ not is_open and good and not quiet
+               and state_attr('sensor.window_advice', 'outlook_ok') is true
                and is_state('person.ryan_abel', 'home')
                and advice_sent < good_since
                and (now_ts - advice_sent) > 10800 }}

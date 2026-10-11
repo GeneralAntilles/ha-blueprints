@@ -1,0 +1,15 @@
+# Window advisor forecast source (2026-10-08). Reference copy of the
+# rest_command block in /Volumes/config/configuration.yaml -- edit here, then
+# re-sync. Called by sensor.window_forecast (window-advisor-templates.yaml).
+#
+# NOAA National Blend of Models (ncep_nbm_conus) via Open-Meteo: free, no key,
+# hourly temp / dew point / precip in °F and inches, current hour first, unix
+# timestamps (UTC). NBM precipitation is the total for the PRECEDING hour;
+# sensor.window_forecast shifts it to the following-hour convention met.no
+# uses (and the advisor assumes), hence 14 hours for 12 usable. Location comes from zone.home.
+rest_command:
+  window_forecast_nbm:
+    url: >-
+      https://api.open-meteo.com/v1/forecast?latitude={{ state_attr('zone.home', 'latitude') | round(3) }}&longitude={{ state_attr('zone.home', 'longitude') | round(3) }}&hourly=temperature_2m,dew_point_2m,precipitation&temperature_unit=fahrenheit&precipitation_unit=inch&timeformat=unixtime&forecast_hours=14&models=ncep_nbm_conus
+    method: get
+    timeout: 20

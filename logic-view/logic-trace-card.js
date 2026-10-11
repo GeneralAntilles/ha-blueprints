@@ -28,6 +28,7 @@ const UNITS = {
   '°F in': [(v) => `${Math.round(v)}°`, 'inside'],
   '°F dew pt out': [(v) => `${Math.round(v)}°`, 'dew point outside'],
   '% RH in': [(v) => `${Math.round(v)}%`, 'humidity inside'],
+  'BTU/lb out': [(v) => v.toFixed(1), 'BTU/lb outside (heat + moisture)'],
   'µg/m³ rise': [(v) => `+${Math.round(v)}`, 'µg/m³ over 1-h low'],
   'min': [(v) => Math.round(v), 'minutes running'],
   'fans': [(v) => Math.round(v), 'fans owned'],
@@ -158,7 +159,7 @@ class LogicTraceCard extends HTMLElement {
     </li>
   </ol>
 
-  <div class="side">${this._strip(a, gates, tone === 'good')}${key(this._legendOpen ?? this._config.legend === 'open')}</div>
+  <div class="side">${this._strip(a, gates, tone === 'good', trace)}${key(this._legendOpen ?? this._config.legend === 'open')}</div>
   </div>
 
   <footer>
@@ -751,8 +752,9 @@ class LogicTraceCard extends HTMLElement {
     const now = Date.now();
     const hours = (attrs.hours ?? []).filter((h) => Date.parse(h.t) >= now - 3600e3);
     const pills = g.hours.map((p, k) => {
-      const h = hours[k];
-      const label = h ? new Date(h.t).toLocaleTimeString([], { hour: 'numeric' }) : `+${k}h`;
+      // v2 traces name each interval's start (hour_t); older ones align by index.
+      const t = Array.isArray(g.hour_t) ? g.hour_t[k] : hours[k]?.t;
+      const label = t && isFinite(Date.parse(t)) ? new Date(t).toLocaleTimeString([], { hour: 'numeric' }) : `+${k}h`;
       const wet = isNum(p) && p > 0;
       return `<span class="pill ${wet ? 'wet' : 'dry'}"><ha-icon icon="${wet ? 'mdi:weather-pouring' : 'mdi:weather-cloudy'}"></ha-icon>${esc(label)}${wet ? `<small>${p.toFixed(2)}″</small>` : ''}</span>`;
     }).join('');
@@ -760,36 +762,57 @@ class LogicTraceCard extends HTMLElement {
   }
 
   // 12-hour strip: temperature and dew point on one °F axis, the dew point
-  // limit, rain bars, and where "good until" falls.
-  _strip(attrs, gates, showUntil) {
-    const hours = (attrs.hours ?? []).filter((h) => Date.parse(h.t) >= Date.now() - 3600e3).slice(0, 12);
+  // limit, rain bars, and where "good until" falls. When the trace carries
+  // `proj` (forecast shape anchored on the station's reading) that is drawn
+  // instead of the raw forecast, with indoor temp / dew point as dashed
+  // references, the 2-hour outlook window shaded and "likely good" marked.
+  _strip(attrs, gates, showUntil, trace = {}) {
+    const corrected = Array.isArray(trace.proj) && trace.proj.length >= 3;
+    const hours = (corrected ? trace.proj : (attrs.hours ?? []).filter((h) => Date.parse(h.t) >= Date.now() - 3600e3))
+      .filter((h) => isNum(h.temp) && isNum(h.dp) && isFinite(Date.parse(h.t))).slice(0, 13);
     if (hours.length < 3) return '';
     const humid = gates.find((g) => g.k === 'humid');
-    const vals = hours.flatMap((h) => [h.temp, h.dp]).concat(isNum(humid?.t) ? [humid.t] : []).filter(isNum);
+    const inT = trace.indoor?.temp, inD = trace.indoor?.dp;
+    const vals = hours.flatMap((h) => [h.temp, h.dp]).concat([humid?.t, inT, inD].filter(isNum));
     const lo = Math.floor(Math.min(...vals) - 3), hi = Math.ceil(Math.max(...vals) + 3);
     const W = 600, H = 150, top = 12, bot = 118, n = hours.length;
-    const x = (k) => (k / (n - 1)) * W;
+    const t0 = Date.parse(hours[0].t), tN = Date.parse(hours[n - 1].t);
+    const xt = (ms) => clamp(((ms - t0) / (tN - t0 || 1)) * W, 0, W);
+    const x = (k) => xt(Date.parse(hours[k].t));
     const y = (v) => bot - ((v - lo) / (hi - lo)) * (bot - top);
     const line = (key) => hours.map((h, k) => `${k ? 'L' : 'M'}${x(k).toFixed(1)},${y(h[key]).toFixed(1)}`).join('');
     const area = (key) => `${line(key)}L${W},${bot}L0,${bot}Z`;
     const maxP = Math.max(0.1, ...hours.map((h) => (isNum(h.precip) ? h.precip : 0)));
     const bars = hours.map((h, k) => (isNum(h.precip) && h.precip > 0
       ? `<rect class="rain" x="${x(k) - 9}" y="${H - 4 - (h.precip / maxP) * 26}" width="18" height="${(h.precip / maxP) * 26}" rx="3"/>` : '')).join('');
-    const limit = isNum(humid?.t) ? `<line class="limit" x1="0" x2="${W}" y1="${y(humid.t)}" y2="${y(humid.t)}"/>` : '';
-    let until = '';
-    if (showUntil && attrs.good_until) {
-      const k = hours.findIndex((h) => h.t === attrs.good_until || Date.parse(h.t) >= Date.parse(attrs.good_until));
-      if (k >= 0) until = `<line class="until" x1="${x(k)}" x2="${x(k)}" y1="${top - 8}" y2="${H}"/>`;
-    }
+    const hline = (v, cls) => (isNum(v) ? `<line class="${cls}" x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}"/>` : '');
+    const limit = hline(humid?.t, 'limit');
+    const refs = corrected ? hline(inT, 'ref ref-temp') + hline(inD, 'ref ref-dp') : '';
+    const soon = corrected ? `<rect class="soon" x="0" y="${top - 8}" width="${xt(t0 + 2 * 3600e3)}" height="${bot - top + 8}"/>` : '';
+    const mark = (t, cls) => {
+      if (!t) return '';
+      const k = hours.findIndex((h) => h.t === t || Date.parse(h.t) >= Date.parse(t));
+      return k >= 0 ? `<line class="${cls}" x1="${x(k)}" x2="${x(k)}" y1="${top - 8}" y2="${H}"/>` : '';
+    };
+    const until = showUntil ? mark(trace.good_until ?? attrs.good_until, 'until') : '';
+    const opens = !showUntil && corrected ? mark(trace.opens_around, 'opens') : '';
+    const tr = trace.trend ?? {};
+    const sgn = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(Math.round(v))}°`;
+    const sub = corrected && isNum(tr.bias_temp)
+      ? `<p class="strip-sub">Forecast shape, anchored on the backyard station (${sgn(tr.bias_temp)} temp, ${sgn(tr.bias_dp)} dew pt vs ${esc(attrs.source === 'nbm' ? 'NBM' : attrs.source ?? 'forecast')})${
+        isNum(tr.temp_2h) ? ` · next 2 h: outside ${sgn(tr.temp_2h)}, dew pt ${sgn(tr.dp_2h)}` : ''}${
+        trace.opens_around ? ` · could open around <b>${esc(new Date(trace.opens_around).toLocaleTimeString([], { hour: 'numeric' }))}</b>` : ''}</p>` : '';
     const last = hours[n - 1];
     const labels = hours.map((h, k) => (k % 3 === 0 || k === n - 1)
       ? `<span style="left:${(x(k) / W) * 100}%">${esc(k === 0 ? 'now' : new Date(h.t).toLocaleTimeString([], { hour: 'numeric' }))}</span>` : '').join('');
     const tag = (v, cls, text) => `<span class="endtag ${cls}" style="top:${(y(v) / H) * 100}%">${text}</span>`;
     return `
   <section class="strip">
-    <div class="strip-head"><span>Next ${n} hours</span>
-      <span class="legend"><i class="lg-temp"></i>temp <i class="lg-dp"></i>dew point <i class="lg-limit"></i>dew pt limit <i class="lg-rain"></i>rain
-      ${showUntil && attrs.good_until ? '<i class="lg-until"></i>stops being good' : ''}</span></div>
+    <div class="strip-head"><span>Next ${Math.round((tN - t0) / 3600e3)} hours</span>
+      <span class="legend"><i class="lg-temp"></i>temp <i class="lg-dp"></i>dew point <i class="lg-limit"></i>dew pt limit
+      ${refs ? '<i class="lg-ref"></i>inside ' : ''}${soon ? '<i class="lg-soon"></i>next 2 h ' : ''}<i class="lg-rain"></i>rain
+      ${until ? '<i class="lg-until"></i>stops being good' : ''}${opens ? '<i class="lg-opens"></i>could open' : ''}</span></div>
+    ${sub}
     <div class="plot">
       <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">
         <defs>
@@ -798,7 +821,7 @@ class LogicTraceCard extends HTMLElement {
         </defs>
         <path d="${area('temp')}" fill="url(#gt)"/>
         <path d="${area('dp')}" fill="url(#gd)"/>
-        ${limit}${until}
+        ${soon}${refs}${limit}${until}${opens}
         <path class="l-temp" d="${line('temp')}"/>
         <path class="l-dp" d="${line('dp')}"/>
         ${bars}
@@ -1041,12 +1064,20 @@ h1 { margin: 1px 0 0; font-size: 23px; line-height: 1.15; font-weight: 700; colo
 .lg-limit { background: repeating-linear-gradient(90deg, var(--lt-dp) 0 3px, transparent 3px 6px); }
 .lg-rain { background: var(--lt-rain); height: 8px !important; width: 8px !important; border-radius: 2px !important; }
 .lg-until { background: var(--lt-pass); width: 3px !important; height: 12px !important; }
+.lg-opens { background: repeating-linear-gradient(180deg, var(--lt-pass) 0 3px, transparent 3px 5px); width: 3px !important; height: 12px !important; }
+.lg-ref { background: repeating-linear-gradient(90deg, var(--lt-soft) 0 2px, transparent 2px 5px); }
+.lg-soon { background: color-mix(in srgb, var(--lt-ink) 12%, transparent); height: 10px !important; width: 12px !important; border-radius: 2px !important; }
 .plot { position: relative; margin: 10px 34px 0 0; }
 .plot svg { display: block; width: 100%; height: 124px; overflow: visible; }
 .l-temp, .l-dp { fill: none; stroke-width: 2.5; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
 .l-temp { stroke: var(--lt-temp); } .l-dp { stroke: var(--lt-dp); }
 .limit { stroke: var(--lt-dp); stroke-width: 1.5; stroke-dasharray: 5 5; opacity: .75; vector-effect: non-scaling-stroke; }
 .until { stroke: var(--lt-pass); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.opens { stroke: var(--lt-pass); stroke-width: 2; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.ref { stroke-width: 1.25; stroke-dasharray: 2 4; opacity: .7; vector-effect: non-scaling-stroke; }
+.ref-temp { stroke: var(--lt-temp); } .ref-dp { stroke: var(--lt-dp); }
+.soon { fill: color-mix(in srgb, var(--lt-ink) 6%, transparent); }
+.strip-sub { margin: 4px 0 0; font-size: 11.5px; color: var(--lt-soft); font-variant-numeric: tabular-nums; }
 .rain { fill: var(--lt-rain); opacity: .85; }
 .endtag, .limtag { position: absolute; right: -34px; transform: translateY(-50%); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .t-temp { color: var(--lt-temp); } .t-dp { color: var(--lt-dp); }
