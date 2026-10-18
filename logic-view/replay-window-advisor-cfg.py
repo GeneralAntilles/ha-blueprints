@@ -65,17 +65,19 @@ def strip(d):
     d.pop('units', None)
     for g in d.get('gates', []):
         g.pop('soft', None)
+        g.pop('soft_label', None)
         g.pop('note', None) if g.get('k') == 'cold' else None
-        if g.get('note', 0) is None and g.get('k') in ('rain', 'gust', 'pm', 'rh'):
-            del g['note']   # 2026-10-18: optional-sensor note, None when configured
-    ks = [g.get('k') for g in d.get('gates', [])]
-    if 'heat' in ks:
-        # Never fails without a heat input, so it never decides; later
-        # gates shift down one.
-        hi = ks.index('heat')
-        d['gates'] = [g for g in d['gates'] if g.get('k') != 'heat']
-        if d.get('decided', -1) > hi:
-            d['decided'] -= 1
+        if g.get('note', 0) is None and g.get('k') in ('rain', 'gust', 'pm', 'rh', 'warm', 'enthalpy'):
+            del g['note']   # optional-sensor / AC-check notes, None when not in play
+    # heat (2026-10-17) and cool (2026-10-18) never fail without thermostat
+    # input, so they never decide; drop them and shift later indices down.
+    gates = d.get('gates', [])
+    drop = [i for i, g in enumerate(gates) if g.get('k') in ('heat', 'cool')]
+    if drop:
+        dec = d.get('decided', -1)
+        d['gates'] = [g for i, g in enumerate(gates) if i not in drop]
+        if dec >= 0:
+            d['decided'] = dec - sum(1 for i in drop if i < dec)
     return d
 
 

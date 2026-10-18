@@ -10,7 +10,8 @@ blueprint:
 
     One push per episode. A "Windows open" toggle (input_boolean) records
     whether the windows are open; the buttons flip it, and you can flip it
-    yourself (or from HomeKit / Siri).
+    yourself (or from HomeKit / Siri). Give the advisor the same toggle (its
+    "Windows open" input) so it judges open windows by the stay-open limits.
 
 
     **Needs one helper:** a Text helper (input_text, max length 255, no
@@ -120,6 +121,11 @@ triggers:
     entity_id: !input advisor
     attribute: extreme
     to: true
+    id: check
+  # The advisor has caught up with the windows (its "windows open" input).
+  - trigger: state
+    entity_id: !input advisor
+    attribute: windows_open
     id: check
   - trigger: state
     entity_id: !input advisor
@@ -339,9 +345,15 @@ actions:
       # and bad. Quiet hours deliver silently; skipped for 45 min after a
       # hazard push, which already said "close". "Crack them" counts as
       # good, so with thermostats this fires on heat headroom, not cold.
+      # Right after the windows are flagged open, wait until the advisor
+      # has seen it, if it tracks the toggle (it then judges with the
+      # stay-open limits and may well be good); its windows_open attribute
+      # changing re-runs this.
       - conditions: >-
           {{ is_open and bad and not hazard
              and trigger.id in ['check', 'morning', 'switch']
+             and (trigger.id != 'switch' or a.get('windows_tracked') is not true
+                  or a.get('windows_open') == is_open)
              and now_ts - sent.hazard > 2700
              and (sent.close < [bad_since, open_since] | max
                   or (trigger.id == 'morning' and now_ts - sent.close > 3600)) }}

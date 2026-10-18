@@ -32,7 +32,7 @@ nano .env  # Add HA path, URL, and token
 ### Climate Control
 - **bathroom-controller.yaml** - Combined bathroom automation: humidity fan (threshold/reference/derivative modes, purge, min/max runtimes), motion lights with shower hold (optional scene turn-on, day/night off-delays from a time-of-day sensor or a clock window), optional shower start/cancel button events (e.g. fan-paddle double-taps), optional heater with restart-surviving safety cutoff. Requires HA 2024.10+ and per-bathroom tracking helpers (see the blueprint description)
 - **steamer-controller.yaml** - Garment steamer (or any heating appliance) on a metered smart plug, the appliance's own switch stays the control: exhaust fan on when it draws power (off after a humidity settle - absolute threshold and/or offset from a reference sensor, like bathroom-controller - or a fixed purge, min/max runtimes, manual respect), plug cut after N minutes without motion or past a max runtime, per-event announcements (persistent, mobile notify, TTS), and automatic re-enable - on the next room entry the plug is probed back on; if the appliance still draws power (switch left on) it is cut again and you are told, otherwise it stays on. Manual plug-on / the plug's own button also re-enables. Requires HA 2025.4+ and three input_booleans (running, plug-cut, fan tracking)
-- **window-advisor.yaml** - Window Advisor (template blueprint): one sensor that says when opening the windows will cool the house without letting in humidity, rain, smoke or wind, and when to close them. Forward-looking (2-hour outlook from an hourly forecast, anchored on your own outdoor sensor), weighs heat and moisture together (enthalpy), and with thermostats it says "crack them" on cool nights and only "close" when the heat is about to come on. Debounced, with hazard and forgotten-window flags. Requires HA 2026.10+. See [Window Advisor](#window-advisor)
+- **window-advisor.yaml** - Window Advisor (template blueprint): one sensor that says when opening the windows will cool the house without letting in humidity, rain, smoke or wind, and when to close them. Forward-looking (2-hour outlook from an hourly forecast, anchored on your own outdoor sensor), weighs heat and moisture together (enthalpy), and with thermostats it lets the house drift between the heat and cool setpoints while the windows are open: "crack them" on cool nights, fine on warm afternoons, "close" only when the heat or AC is about to come on. Debounced, with hazard and forgotten-window flags. Requires HA 2026.10+. See [Window Advisor](#window-advisor)
 - **window-advisor-notify.yaml** - Phone pushes for the Window Advisor: good time to open (with an "I opened them" button), time to close, close-now hazards, forgotten-window alarm, can't-see-the-weather, arming away with windows open. Needs one Text helper. Requires HA 2026.10+
 - **temperature-fan-control.yaml** - Temperature-based fan control with multiple speed levels
 - **air-quality-fan.yaml** - Air quality fans (CO2, PM2.5, TVOC sensors)
@@ -85,12 +85,19 @@ the looser "stay" limits after 20 min of good, back after 10 min of bad.
 4. Create a Text helper (max length 255) and an Input Boolean "Windows open",
    then add an automation from the Window Advisor Notifications blueprint.
 
-**Thermostats** (optional): with them, cold outside means "crack them" instead of
-"close", and the close advice comes when a thermostat in a heating mode is
-projected to reach its heat setpoint within the hour, at the rate the house is
-actually cooling (a least-squares fit over the last 90 min). If your climate
-entities round to whole degrees, add each thermostat's finer temperature sensor
-in the same order.
+**Windows open** (optional, recommended): give the advisor the same toggle the
+notifications use. While it's on, the advice answers "should I close?" with the
+looser stay-open limits, whether or not it suggested opening.
+
+**Thermostats** (optional): with them, the windows may stay open as long as the
+house stays between the setpoints. Cold outside means "crack them"; warm outside
+or more total heat outside is fine ("room to spare"). The close advice comes
+when a thermostat is projected to reach its heat setpoint, or its cool setpoint
+while outside isn't cooler than inside, within the hour, at the rate the house
+is actually changing (a least-squares fit over the last 90 min). Humidity limits
+still apply. Opening still needs outside to be cooler, so "good time to open"
+always means it will cool the house. If your climate entities round to whole
+degrees, add each thermostat's finer temperature sensor in the same order.
 
 **Forecast sensor** (optional, instead of a weather entity): any sensor with an
 `hours` attribute holding up to 12 hourly entries `{t, temp, dp, precip}` (ISO
@@ -107,10 +114,11 @@ both limits, which one decided) with the next 12 hours' projection.
 
 ![Logic card for the Window Advisor: twelve checks top to bottom, the first failing one highlighted, and the next hours' projected temperature and dew point](docs/window-advisor-logic-card.png)
 
-**Tests:** `climate/window_advisor.jinja` is the source of the decision; it is
-copied into the blueprint by `climate/build-window-advisor.py` (`--check` in the
-tests). `logic-view/test-window-advisor-v2.py`, `test-window-advisor-blueprint.py`
-and `test-window-advisor-notify.py` render everything in a live Home Assistant.
+**Editing:** `climate/window_advisor.jinja` is the source of the decision; run
+`climate/build-window-advisor.py` to copy it into the blueprint (`--check` to
+verify). `logic-view/replay-window-advisor-cfg.py` (behaviour unchanged against a
+frozen copy) and `logic-view/test-window-advisor-notify.py` (push conditions)
+render in a live Home Assistant.
 
 ## Controller Guide
 

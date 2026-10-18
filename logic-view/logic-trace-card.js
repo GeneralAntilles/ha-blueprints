@@ -37,6 +37,7 @@ const UNITS = {
   'km/h': [(v) => Math.round(v), 'km/h gusts'],
   'm/s': [(v) => v.toFixed(1), 'm/s gusts'],
   '° over heat set': [(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}°`, 'over heat setpoint in 1 h'],
+  '° under cool set': [(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}°`, 'under cool setpoint in 1 h'],
   'µg/m³ rise': [(v) => `+${Math.round(v)}`, 'µg/m³ over 1-h low'],
   'min': [(v) => Math.round(v), 'minutes running'],
   'fans': [(v) => Math.round(v), 'fans owned'],
@@ -687,12 +688,13 @@ class LogicTraceCard extends HTMLElement {
   }
 
   _row(g, i, decided, mode, attrs) {
-    // soft: passes, but limits how far to open (window advisor "crack them").
+    // soft: passes with a caveat (window advisor: "crack only" when cold,
+    // "room to spare" when warm but the AC check has headroom).
     const status = g.fail === true ? 's-fail' : g.soft ? 's-soft' : g.fail === false ? 's-pass' : 's-na';
     const pos = decided < 0 ? 'before' : i < decided ? 'before' : i === decided ? 'decider' : 'after';
     const badge = pos === 'decider' ? '<span class="badge">stops here</span>'
       : pos === 'after' && g.fail ? '<span class="badge also">also blocks</span>'
-      : g.soft ? '<span class="badge soft">crack only</span>' : '';
+      : g.soft ? `<span class="badge soft">${esc(g.soft_label ?? 'crack only')}</span>` : '';
     const otherMode = mode === 'open' ? 'to stay open' : 'to open';
 
     let meta;

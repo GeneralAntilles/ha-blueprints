@@ -113,6 +113,7 @@
     path: GeneralAntilles/window-advisor.yaml
     input:
       instance_key: home
+      windows_open: [input_boolean.windows_open]
       outdoor_temperature: sensor.outdoor_temperature
       outdoor_dew_point: sensor.outdoor_dewpoint
       indoor_temperature: sensor.indoor_temperature
