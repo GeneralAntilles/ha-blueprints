@@ -29,13 +29,20 @@ const UNITS = {
   '°F dew pt out': [(v) => `${Math.round(v)}°`, 'dew point outside'],
   '% RH in': [(v) => `${Math.round(v)}%`, 'humidity inside'],
   'BTU/lb out': [(v) => v.toFixed(1), 'BTU/lb outside (heat + moisture)'],
+  // °C / metric traces (window-advisor.yaml blueprint with units: C).
+  '°C out': [(v) => `${Math.round(v)}°`, 'outside'],
+  '°C in': [(v) => `${Math.round(v)}°`, 'inside'],
+  '°C dew pt out': [(v) => `${Math.round(v)}°`, 'dew point outside'],
+  'kJ/kg out': [(v) => v.toFixed(1), 'kJ/kg outside (heat + moisture)'],
+  'km/h': [(v) => Math.round(v), 'km/h gusts'],
+  'm/s': [(v) => v.toFixed(1), 'm/s gusts'],
   '° over heat set': [(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}°`, 'over heat setpoint in 1 h'],
   'µg/m³ rise': [(v) => `+${Math.round(v)}`, 'µg/m³ over 1-h low'],
   'min': [(v) => Math.round(v), 'minutes running'],
   'fans': [(v) => Math.round(v), 'fans owned'],
 };
 // Unit suffix for "value > limit" comparisons where the number alone is bare.
-const SUFFIX = { 'mph': ' mph', 'µg/m³ PM2.5': ' µg/m³', 'in/h': ' in/h' };
+const SUFFIX = { 'mph': ' mph', 'km/h': ' km/h', 'm/s': ' m/s', 'µg/m³ PM2.5': ' µg/m³', 'in/h': ' in/h' };
 const OPS = { '>': '>', '>=': '≥', '<': '<', '<=': '≤' };
 const fmt = (v, unit) => (isNum(v) ? (UNITS[unit]?.[0] ?? ((x) => Math.round(x * 10) / 10))(v) : '—');
 const caption = (unit) => UNITS[unit]?.[1] ?? unit;
@@ -764,7 +771,7 @@ class LogicTraceCard extends HTMLElement {
     return `<div class="pills">${pills}</div>`;
   }
 
-  // 12-hour strip: temperature and dew point on one °F axis, the dew point
+  // 12-hour strip: temperature and dew point on one axis (°F or °C), the dew point
   // limit, rain bars, and where "good until" falls. When the trace carries
   // `proj` (forecast shape anchored on the station's reading) that is drawn
   // instead of the raw forecast, with indoor temp / dew point as dashed

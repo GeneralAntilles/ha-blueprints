@@ -18,7 +18,7 @@ no thresholds of its own, so the view can't drift from the logic.
 ## Traced so far
 | Heuristic | Decision source | Trace |
 |---|---|---|
-| Window advisor | `climate/window_advisor.jinja` → `/config/custom_templates/` (`homeassistant.reload_custom_templates`) | `sensor.window_advice_trace` |
+| Window advisor | `climate/window_advisor.jinja`, copied into the `window-advisor.yaml` template blueprint by `climate/build-window-advisor.py` (since 2026-10-18; before that `/config/custom_templates/`) | `sensor.window_advice_trace` (the blueprint instance itself) |
 | Intake filter clock | `hvac-monitor/intake_filter.jinja` → `/config/custom_templates/` | `sensor.fresh_air_intake_filter_trace` (`kind: clock`) |
 | Kitchen air exhaust | `climate/kitchen_air.jinja` (decide() pure + live()); the automation's start/end conditions call it (`d.start` / `d.end`) | `sensor.kitchen_air_exhaust_trace` (ladder; idle = start checks, running = keep-running checks) |
 | HVAC health monitor | the detector automation itself (`hvac_monitor_cooling_cycles`), whose events echo the constants each decision tested | `sensor.hvac_cycle_trace` (`kind: cycle`) |
@@ -34,7 +34,8 @@ by the card from those numbers; they mirror the blueprint's trigger templates, w
 individually. Refetches when the automation's `last_triggered` changes or every 60 s. Downstairs
 bath has no humidity sensor configured (fan = manual timeout only), so it has no card.
 
-`sensor.window_advice` and its trace both call `window_advice()`, the same macro.
+`sensor.window_advice` mirrors the advisor sensor's state (recorded twin); the trace is the
+advisor's own `trace` attribute, so the card shows the decision that was made.
 `replay-intake-filter.py` does the same for the filter clock's `step()`/`life()` against
 `intake-filter-v1.yaml` (1500 cases, 0 mismatches); the load, life-used and trace sensors all call `live()`.
 
@@ -46,8 +47,12 @@ targeted PM-clearing cases, 0 mismatches).
 every threshold, 0 mismatches. It pins v1 behaviour: since window advisor v2
 (2026-10-08: enthalpy gate, 58/60 dew point cap, station-anchored forecast trend,
 outlook gate, rain intervals) it no longer matches by design.
-`test-window-advisor-v2.py` holds the v2 unit cases (51, rendered by HA). Re-run it
-after editing the ladder.
+`test-window-advisor-v2.py` holds the decide() unit cases (rendered by HA). Re-run it
+after editing the ladder, then `climate/build-window-advisor.py`.
+`replay-window-advisor-cfg.py` pins the cfg/display/optional-sensor refactors to the frozen v2
+macro (`window-advisor-v2.jinja`, 1500 cases, 0 diffs). `test-window-advisor-blueprint.py`
+(debounce, hazards, units, heat headroom; fake sensors) and `test-window-advisor-notify.py`
+(push matrix) cover the two blueprints.
 
 ## Trace shape (per gate)
 `k, q, fail (true/false/null), reason, v, unit, t, t_alt, cmp ('>', '>=', '<'), lo, hi`,

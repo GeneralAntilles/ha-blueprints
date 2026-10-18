@@ -1,0 +1,400 @@
+blueprint:
+  name: Window Advisor Notifications
+  description: >-
+    Phone pushes for a Window Advisor sensor (window-advisor.yaml): "good time
+    to open" (with an "I opened them" button), "time to close", immediate
+    "close now" for rain / gusts / smoke, a forgotten-window alarm when the
+    house gets too hot, cold or muggy, "can't see the weather" after 30 min
+    blind, and arming away with the windows open.
+
+
+    One push per episode. A "Windows open" toggle (input_boolean) records
+    whether the windows are open; the buttons flip it, and you can flip it
+    yourself (or from HomeKit / Siri).
+
+
+    **Needs one helper:** a Text helper (input_text, max length 255, no
+    initial value) where this automation keeps when it last sent each push.
+    One per advisor.
+  domain: automation
+  source_url: https://github.com/GeneralAntilles/ha-blueprints/blob/main/window-advisor-notify.yaml
+  homeassistant:
+    min_version: 2026.10.0
+  input:
+    advisor:
+      name: Window Advisor sensor
+      selector:
+        entity:
+          filter:
+            domain: sensor
+    windows_open:
+      name: Windows open toggle
+      selector:
+        entity:
+          filter:
+            domain: input_boolean
+    stamps:
+      name: Stamps helper
+      description: A Text helper (max 255) used only by this automation.
+      selector:
+        entity:
+          filter:
+            domain: input_text
+    notify:
+      name: Notify actions
+      description: >-
+        One per line, e.g. notify.mobile_app_my_phone. Buttons and clearing
+        need the Home Assistant Companion app.
+      selector:
+        text:
+          multiple: true
+    presence:
+      name: Only suggest opening while home
+      description: >-
+        Optional: people, groups, zones or binary sensors; anyone "home",
+        "on" or a number above 0 counts. Close and hazard pushes always go
+        out.
+      default: []
+      selector:
+        entity:
+          multiple: true
+    quiet_start:
+      name: Quiet hours start
+      description: >-
+        No "open" suggestions during quiet hours (an episode that starts
+        overnight is announced when they end); "close" arrives silently.
+      default: "22:00:00"
+      selector:
+        time:
+    quiet_end:
+      name: Quiet hours end
+      description: Also when a still-open, still-bad window gets a reminder.
+      default: "07:00:00"
+      selector:
+        time:
+    alarm:
+      name: Alarm panel
+      description: Optional. Arming away while the windows are flagged open sends a push.
+      default: []
+      selector:
+        entity:
+          multiple: true
+          filter:
+            domain: alarm_control_panel
+    instance_key:
+      name: Instance key
+      description: >-
+        Prefix for notification tags and button ids, so two advisors don't
+        clear each other's pushes. Empty = this automation's id.
+      default: ""
+      selector:
+        text:
+
+mode: queued
+max: 25
+
+variables:
+  advisor: !input advisor
+  open_e: !input windows_open
+  stamps_e: !input stamps
+  notify_list: !input notify
+  presence_e: !input presence
+  qs: !input quiet_start
+  qe: !input quiet_end
+  ik_in: !input instance_key
+  ik: >-
+    {{ (ik_in if ik_in else this.entity_id.split('.')[1]) | lower
+       | regex_replace('[^a-z0-9_]', '_') }}
+  IK: "{{ ik | upper }}"
+
+triggers:
+  - trigger: state
+    entity_id: !input advisor
+    attribute: good
+    id: check
+  - trigger: state
+    entity_id: !input advisor
+    attribute: hazard_reason_since
+    id: check
+  - trigger: state
+    entity_id: !input advisor
+    attribute: extreme
+    to: true
+    id: check
+  - trigger: state
+    entity_id: !input advisor
+    attribute: valid
+    to: false
+    for:
+      minutes: 30
+    id: blind
+  - trigger: state
+    entity_id: !input windows_open
+    to: ["on", "off"]
+    id: switch
+  - trigger: state
+    entity_id: !input presence
+    id: check
+  - trigger: time
+    at: !input quiet_end
+    id: morning
+  - trigger: time_pattern
+    minutes: /15
+    id: check
+  - trigger: state
+    entity_id: !input alarm
+    to: armed_away
+    id: away
+  - trigger: event
+    event_type: mobile_app_notification_action
+    id: button
+
+actions:
+  # Evaluated when the run starts (not when it was queued).
+  - variables:
+      a: "{{ states[advisor].attributes if states[advisor] is not none else {} }}"
+      now_ts: "{{ as_timestamp(now()) }}"
+      stamp: "{{ as_timestamp(now()) | round(0, 'ceil') | int }}"
+      is_open: "{{ is_state(open_e, 'on') }}"
+      open_since: "{{ as_timestamp(states[open_e].last_changed) if states[open_e] is not none else 0 }}"
+      good: "{{ a.get('good') is true }}"
+      bad: "{{ a.get('good') is false }}"
+      good_since: "{{ a.get('good_since') | float(0) }}"
+      bad_since: "{{ a.get('bad_since') | float(0) }}"
+      hazard: "{{ a.get('hazard') is true }}"
+      hazard_reason: "{{ a.get('hazard_reason') }}"
+      hazard_since: "{{ a.get('hazard_reason_since') | float(0) }}"
+      extreme: "{{ a.get('extreme') is true }}"
+      extreme_since: "{{ a.get('extreme_since') | float(0) }}"
+      blind_since: "{{ a.get('blind_since') | float(0) }}"
+      quiet: >-
+        {% set t = now().strftime('%H:%M:%S') %}
+        {{ (t >= qs or t < qe) if qs > qe else (qs <= t < qe) }}
+      home: >-
+        {% set es = (presence_e if presence_e is list else [presence_e]) | select | list %}
+        {% set ns = namespace(any=false) %}
+        {% for e in es %}
+          {% set s = states(e) %}
+          {% set ns.any = ns.any or s in ['home', 'on'] or (is_number(s) and s | float > 0) %}
+        {% endfor %}
+        {{ es | length == 0 or ns.any }}
+      sent: >-
+        {% set s = states(stamps_e) %}
+        {% set d = s | from_json if s.startswith('{') else {} %}
+        {{ dict({'advice': 0, 'close': 0, 'hazard': 0, 'extreme': 0, 'blind': 0}, **(d if d is mapping else {})) }}
+      reason: "{{ states(advisor) }}"
+      summary: "{{ a.get('summary') }}"
+      until: >-
+        {% set t = a.get('good_until') %}
+        {% set e = a.get('forecast_through') %}
+        {% set ts = as_timestamp(t, none) if t else none %}
+        {% set te = as_timestamp(e, none) if e else none %}
+        {{ ('until about ' ~ ts | timestamp_custom('%-I %p')) if ts is number
+           else (('through at least ' ~ te | timestamp_custom('%-I %p')) if te is number
+           else 'for now') }}
+  # Flipping the switch (any way) clears the now-stale opposite push.
+  - if: "{{ trigger.id == 'switch' }}"
+    then:
+      - repeat:
+          for_each: "{{ notify_list }}"
+          sequence:
+            - action: "{{ repeat.item }}"
+              data:
+                message: clear_notification
+                data:
+                  tag: "{{ ik ~ ('_window_open' if is_open else '_window_close') }}"
+              continue_on_error: true
+  - choose:
+      # ---------------- notification buttons ------------------------------
+      # "I opened them" is only honoured for the latest advice, within 6 h,
+      # and once (the stamp is bumped when used). "I closed them" works
+      # whenever the windows are flagged open.
+      - conditions:
+          - condition: trigger
+            id: button
+        sequence:
+          - variables:
+              act: "{{ trigger.event.data.action | default('') }}"
+          - choose:
+              - conditions: >-
+                  {{ act == IK ~ '_WINDOWS_OPENED_' ~ (sent.advice | int) and not is_open
+                     and now_ts - sent.advice < 21600 }}
+                sequence:
+                  - action: input_text.set_value
+                    target:
+                      entity_id: "{{ stamps_e }}"
+                    data:
+                      value: "{{ dict(sent, advice=(sent.advice | int) + 1) | to_json }}"
+                  - action: input_boolean.turn_on
+                    target:
+                      entity_id: "{{ open_e }}"
+              - conditions: "{{ act == IK ~ '_WINDOWS_CLOSED' and is_open }}"
+                sequence:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: "{{ open_e }}"
+
+      # ---------------- hazard while open: immediate, any hour ------------
+      # New episode = a hazard started, changed kind (smoke -> rain), or the
+      # windows were opened during it.
+      - conditions: "{{ is_open and hazard and sent.hazard < [hazard_since, open_since] | max }}"
+        sequence:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ stamps_e }}"
+            data:
+              value: "{{ dict(sent, hazard=stamp) | to_json }}"
+          - repeat:
+              for_each: "{{ notify_list }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: 🌧️ Close the windows now
+                    message: "{{ hazard_reason }}."
+                    data:
+                      tag: "{{ ik }}_window_close"
+                      group: "{{ ik }}_windows"
+                      push:
+                        interruption-level: time-sensitive
+                      actions:
+                        - action: "{{ IK }}_WINDOWS_CLOSED"
+                          title: I closed them
+                  continue_on_error: true
+
+      # ---------------- house too hot/cold/muggy while open ---------------
+      # Repeats every 2 h while it lasts.
+      - conditions: >-
+          {{ is_open and extreme
+             and (sent.extreme < [extreme_since, open_since] | max or now_ts - sent.extreme > 7200) }}
+        sequence:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ stamps_e }}"
+            data:
+              value: "{{ dict(sent, extreme=stamp) | to_json }}"
+          - repeat:
+              for_each: "{{ notify_list }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: 🌡️ Time to close the windows
+                    message: "{{ a.get('extreme_reason') }} with the windows open."
+                    data:
+                      tag: "{{ ik }}_window_close"
+                      group: "{{ ik }}_windows"
+                      push:
+                        interruption-level: time-sensitive
+                      actions:
+                        - action: "{{ IK }}_WINDOWS_CLOSED"
+                          title: I closed them
+                  continue_on_error: true
+
+      # ---------------- advisor blind while open --------------------------
+      # After 30 min Blind, once per Blind spell. Also caught by the 15-min
+      # check (blind_since is kept in the advisor's attributes), since a
+      # reload cancels the trigger's 30-min wait.
+      - conditions: >-
+          {{ is_open and blind_since > 0 and now_ts - blind_since >= 1800
+             and sent.blind < blind_since }}
+        sequence:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ stamps_e }}"
+            data:
+              value: "{{ dict(sent, blind=stamp) | to_json }}"
+          - repeat:
+              for_each: "{{ notify_list }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: 🪟 Window advisor can't see the weather
+                    message: "{{ reason }}. Windows are still flagged open."
+                    data:
+                      tag: "{{ ik }}_window_close"
+                      group: "{{ ik }}_windows"
+                  continue_on_error: true
+
+      # ---------------- arming away with windows open ---------------------
+      - conditions: "{{ trigger.id == 'away' and is_open }}"
+        sequence:
+          - repeat:
+              for_each: "{{ notify_list }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: 🪟 Windows are flagged open
+                    message: The alarm was set to Away while the windows are flagged open.
+                    data:
+                      tag: "{{ ik }}_window_close"
+                      group: "{{ ik }}_windows"
+                      push:
+                        interruption-level: time-sensitive
+                      actions:
+                        - action: "{{ IK }}_WINDOWS_CLOSED"
+                          title: They're closed
+                  continue_on_error: true
+
+      # ---------------- time to close -------------------------------------
+      # Once per bad episode, or again when quiet hours end if still open
+      # and bad. Quiet hours deliver silently; skipped for 45 min after a
+      # hazard push, which already said "close". "Crack them" counts as
+      # good, so with thermostats this fires on heat headroom, not cold.
+      - conditions: >-
+          {{ is_open and bad and not hazard
+             and trigger.id in ['check', 'morning', 'switch']
+             and now_ts - sent.hazard > 2700
+             and (sent.close < [bad_since, open_since] | max
+                  or (trigger.id == 'morning' and now_ts - sent.close > 3600)) }}
+        sequence:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ stamps_e }}"
+            data:
+              value: "{{ dict(sent, close=stamp) | to_json }}"
+          - repeat:
+              for_each: "{{ notify_list }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: 🪟 Time to close the windows
+                    message: "{{ reason }}. {{ summary }}."
+                    data:
+                      tag: "{{ ik }}_window_close"
+                      group: "{{ ik }}_windows"
+                      push:
+                        interruption-level: "{{ 'passive' if quiet else 'active' }}"
+                      actions:
+                        - action: "{{ IK }}_WINDOWS_CLOSED"
+                          title: I closed them
+                  continue_on_error: true
+
+      # ---------------- good time to open ---------------------------------
+      # Once per good episode, while home and outside quiet hours (an
+      # overnight episode is announced when they end); 3 h floor between
+      # pushes. Needs open_ok: the strict opening limits pass right now,
+      # 2-hour outlook included ("Crack them" keeps `good` on too).
+      - conditions: >-
+          {{ not is_open and good and not quiet and home
+             and a.get('open_ok') is true
+             and sent.advice < good_since
+             and now_ts - sent.advice > 10800 }}
+        sequence:
+          - action: input_text.set_value
+            target:
+              entity_id: "{{ stamps_e }}"
+            data:
+              value: "{{ dict(sent, advice=stamp) | to_json }}"
+          - repeat:
+              for_each: "{{ notify_list }}"
+              sequence:
+                - action: "{{ repeat.item }}"
+                  data:
+                    title: 🪟 Good time to open the windows
+                    message: "{{ summary }}. Looks good {{ until }}."
+                    data:
+                      tag: "{{ ik }}_window_open"
+                      group: "{{ ik }}_windows"
+                      actions:
+                        - action: "{{ IK }}_WINDOWS_OPENED_{{ stamp }}"
+                          title: I opened them
+                  continue_on_error: true

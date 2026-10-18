@@ -3,7 +3,7 @@
 its defaults vs the frozen v2 macro (window-advisor-v2.jinja, live 2026-10-08),
 both rendered by HA. Random cases are clustered on every threshold, with
 moving forecast curves, rain, gaps and both modes. The only allowed difference
-are the new trend.hours, level and open_ok keys. Since 2026-10-17 the defaults differ
+are the new trend.hours, level, open_ok and units keys. Since 2026-10-17 the defaults differ
 from v2 (gust_stay 30), so the new side gets cfg {'gust_stay': 25}, and no
 heat input (raw.heat absent = the v2 cold rule). Usage (after sourcing .env):
     python3 logic-view/replay-window-advisor-cfg.py [N]"""
@@ -62,9 +62,12 @@ def strip(d):
     d.get('trend', {}).pop('hours', None)
     d.pop('level', None)
     d.pop('open_ok', None)
+    d.pop('units', None)
     for g in d.get('gates', []):
         g.pop('soft', None)
         g.pop('note', None) if g.get('k') == 'cold' else None
+        if g.get('note', 0) is None and g.get('k') in ('rain', 'gust', 'pm', 'rh'):
+            del g['note']   # 2026-10-18: optional-sensor note, None when configured
     ks = [g.get('k') for g in d.get('gates', [])]
     if 'heat' in ks:
         # Never fails without a heat input, so it never decides; later

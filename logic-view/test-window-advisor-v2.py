@@ -51,12 +51,13 @@ BASE = {'ot': 64, 'odp': 52, 'it': 74, 'idp': 55, 'irh': 52, 'pm': 5, 'rr': 0, '
 FLAT = hours([64] * 12, [52] * 12)
 
 
-def decide(raw=None, hrs=None, stay=False, now=NOW, rr_recent=False):
+def decide(raw=None, hrs=None, stay=False, now=NOW, rr_recent=False, cfg=None):
     raw = {k: (v if isinstance(v, dict) or v is None else str(v)) for k, v in (raw or BASE).items()}
     hrs = FLAT if hrs is None else hrs
     fetched = dt.datetime.fromtimestamp(now - 600, dt.timezone.utc).isoformat()
     tpl = SRC + (f"{{{{ decide({jlit(raw)}, {jlit(hrs)}, {jlit(fetched)}, {now}, "
-                 f"{'true' if stay else 'false'}, {'true' if rr_recent else 'false'}) }}}}")
+                 f"{'true' if stay else 'false'}, {'true' if rr_recent else 'false'}"
+                 + (f", {jlit(cfg)}" if cfg else '') + ") }}")
     return json.loads(render(tpl))
 
 
@@ -276,6 +277,33 @@ check('open: 27 mph gusts block', dd['state'] == 'Too gusty (27 mph gusts)', dd[
 dd = decide({**BASE, 'gust': 30}, stay=True)
 check('stay: 30 mph gusts close', dd['state'] == 'Too gusty (30 mph gusts)' and gate(dd, 'gust')['t'] == 30, dd['state'])
 
+# --- display units (2026-10-18, blueprint): decision in °F, shown in °C ------
+f_ = decide({**BASE, 'gust': 27})
+c_ = decide({**BASE, 'gust': 27}, cfg={'disp': 'C', 'wind': 'km/h'})
+check('°C: same decision', f_['decided'] == c_['decided'] and f_['level'] == c_['level'], (f_['state'], c_['state']))
+check('°C: gust reason in km/h', c_['state'] == 'Too gusty (43 km/h gusts)', c_['state'])
+g_ = gate(c_, 'warm')
+check('°C: warm gate v/t converted', g_['unit'] == '°C out' and g_['v'] == round((64 - 32) / 1.8, 1) and g_['t'] == round((74 - 2 - 32) / 1.8, 1), g_)
+check('°C: warm rule in °C', g_['rule'] == 'inside − 1.1°', g_['rule'])
+check('°C: gust gate t in km/h', gate(c_, 'gust')['t'] == round(25 * 1.609344, 1) and gate(c_, 'gust')['unit'] == 'km/h', gate(c_, 'gust'))
+check('°C: enthalpy in kJ/kg', gate(c_, 'enthalpy')['unit'] == 'kJ/kg out' and abs(gate(c_, 'enthalpy')['v'] - (gate(f_, 'enthalpy')['v'] * 2.326 - 17.86)) < 0.2, gate(c_, 'enthalpy'))
+check('°C: proj and indoor converted', c_['proj'][0]['temp'] == round((64 - 32) / 1.8, 1) and c_['indoor']['temp'] == round((74 - 32) / 1.8, 1), (c_['proj'][0], c_['indoor']))
+dd = decide(COLD, COOL, cfg={'disp': 'C'})
+check('°C: cold reason', dd['state'] == 'Too cold outside (11°C)', dd['state'])
+dd = decide({**COLD, 'heat': heat(0.8, 0.2)}, COOL, stay=True, cfg={'disp': 'C'})
+check('°C: heat reason', dd['state'] == 'Heat would kick in soon (Downstairs 20.4°, set to 20°)', dd['state'])
+
+# --- optional sensors absent = not configured (blueprint) ---------------------
+lean = {k: v for k, v in BASE.items() if k not in ('pm', 'rr', 'gust', 'irh')}
+dd = decide(lean)
+check('no PM/rain/gust/RH sensors: still Good, not Blind', dd['state'] == 'Good' and dd['open_ok'] is True, dd['state'])
+check('unconfigured gates pass with a note', all(gate(dd, k)['fail'] is False and gate(dd, k)['note'] for k in ('rain', 'gust', 'pm', 'rh')),
+      [(gate(dd, k)['fail'], gate(dd, k).get('note')) for k in ('rain', 'gust', 'pm', 'rh')])
+dd = decide({**BASE, 'pm': 'unavailable'})
+check('configured but unavailable PM is still Blind', dd['state'].startswith('Blind'), dd['state'])
+dd = decide(lean, rr_recent=True)
+check('rained-recently still blocks without a rain-rate sensor', dd['state'] == 'Raining', dd['state'])
+
 # --- sensor.window_forecast parsing (variables block rendered in HA) --------
 import yaml
 blk = yaml.safe_load((ROOT / 'climate' / 'window-advisor-templates.yaml').read_text())[0]['action'][2]['variables']
@@ -292,35 +320,8 @@ check('met.no fallback skips malformed hours, keeps missing precip as none', out
 out = render(f"{{% set nbm_hours = [] %}}{{% set fc = {jlit({'weather.forecast_home': {}})} %}}{blk['met_hours']}")
 check('met.no response without forecast list -> empty', out.strip() == '[]', out)
 
-# --- sensor.window_heat_headroom (live thermostat modes/setpoints, synthetic samples)
-heat_blk = [b for b in yaml.safe_load((ROOT / 'climate' / 'window-advisor-templates.yaml').read_text())
-            if isinstance(b, dict) and 'trigger' in b and 'window_heat_headroom' in str(b)][0]
-hv = heat_blk['action'][0]['variables']
-STATS = hv['stats']
-now_s = round(dt.datetime.now().timestamp())
-import ast
-def fit(per_climate):
-    tpl = (f"{{% set stats = {jlit(STATS)} %}}{{% set now_ts = {now_s} %}}"
-           f"{{% set samples = {jlit(per_climate)} %}}{hv['fit']}")
-    return ast.literal_eval(render(tpl).strip())
-line = [[now_s - 300 * k, round(70 - 0.6 * (18 - k) * 300 / 3600, 2), 0] for k in range(18, -1, -1)]
-heating = [s_['climate'] for s_ in STATS]
-f = fit({c_: line for c_ in heating})
-check('headroom: least-squares rate from samples', f['complete'] and f['each'] and all(abs(e['rate'] + 0.6) < 0.02 for e in f['each']), f)
-check('headroom: proj = head + rate·1h', all(abs(e['proj'] - (e['head'] + e['rate'])) < 0.02 for e in f['each']), f)
-f = fit({c_: line[-3:] for c_ in heating})
-check('headroom: < 45 min of samples -> incomplete', not f['complete'] and f['each'] == [], f)
-f = fit({heating[0]: line})
-check('headroom: one thermostat without samples -> incomplete', not f['complete'] and len(f['each']) == 1, f)
-ac = [[t_, v_, 1 if k_ == 5 else 0] for k_, (t_, v_, _) in enumerate(line)]
-f = fit({c_: ac for c_ in heating})
-check('headroom: AC ran in the window -> rate 0', all(e['rate'] == 0 and e['ac'] for e in f['each']), f)
-drop = [[now_s - 300 * k, 70.0 if k > 1 else 68.0, 0] for k in range(17, -1, -1)]
-f = fit({c_: drop for c_ in heating})
-check('headroom: reading never above the latest sample', all(e['temp'] == 68.0 for e in f['each']), f)
-old2 = [[t_, v_] for t_, v_, _ in line]
-f = fit({c_: old2 for c_ in heating})
-check('headroom: 2-element samples from before the AC flag still fit', f['complete'], f)
+# (The heat-headroom fit moved into the window-advisor.yaml blueprint on
+# 2026-10-18; its cases are in test-window-advisor-blueprint.py.)
 # open_ok: strict opening limits, any mode
 dd = decide({**BASE, 'gust': 27, 'heat': heat(6, 6)}, stay=True)
 check('open_ok false on 27 mph gusts in stay mode (state Good)', dd['state'] == 'Good' and dd['open_ok'] is False, (dd['state'], dd['open_ok']))

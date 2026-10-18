@@ -1,16 +1,17 @@
-# Window advisor (2026-09-27). Reference copy of the block appended to
-# /Volumes/config/templates.yaml -- edit here, then re-sync that block.
-# Plan + review notes: ~/.claude/plans/comfort-window-advisor.md
+# Window advisor (2026-09-27; on the window-advisor.yaml blueprint since
+# 2026-10-18). Reference copy of the block in /Volumes/config/templates.yaml
+# -- edit here, then re-sync that block.
 #
 #   sensor.window_forecast          next 12 hours (NBM, met.no fallback) with dew point
-#   sensor.window_heat_headroom     °F above the nearest heat setpoint + 1-h projection
-#   sensor.window_advice            "Good" | blocking reason | "Blind: ..."
-#   sensor.window_advice_trace      the whole ladder, for the Logic tab
-#   binary_sensor.window_weather_good   debounced Good or Crack (20 min on / 10 min off)
-#   binary_sensor.window_hazard     immediate: rain now, gusts, smoke/dust
+#   sensor.window_advice_trace      the advisor (blueprint instance): state = advice,
+#                                   attributes = debounce, hazard, extreme, trace
+#   sensor.window_advice            compat: same state + the attributes the
+#                                   dashboard and pushes used (recorded, keeps history)
+#   binary_sensor.window_weather_good   compat: the advisor's debounced `good`
+#                                   (Good or Crack them), unavailable while Blind
 #
-# window_advice switches from "enter" to "stay" thresholds once
-# window_weather_good is on (hysteresis), so open/close advice doesn't flap.
+# The decision itself is climate/window_advisor.jinja, copied into the
+# blueprint by climate/build-window-advisor.py.
 
 # Hourly forecast, refreshed every 30 min. Primary source is NOAA's
 # National Blend of Models via Open-Meteo (rest_command.window_forecast_nbm,
@@ -106,227 +107,49 @@
           {% elif src == 'met.no' %}{{ met_hours }}
           {% else %}{{ this.attributes.get('hours', []) }}{% endif %}
 
-# Heat headroom (2026-10-17): how close the house is to making a thermostat
-# call for heat, and where it will be in an hour at the rate it is cooling
-# now. Rate and reading come from a least-squares line through the last
-# 90 min of 5-min samples kept in this sensor's own attributes (the HomeKit
-# reading moves in 0.18 °F steps; a 1-h window swung ±0.4 °F/h), so they
-# reflect how far the windows are actually open. Only thermostats in a heating mode count;
-# warming never counts as headroom gained. decide() reads the `decide`
-# attribute: no thermostat heating, or any heating one with < 45 min of
-# samples, leaves it none
-# and the advisor falls back to the plain outdoor cold limit.
-- trigger:
-    - trigger: time_pattern
-      minutes: /5
-    - trigger: homeassistant
-      event: start
-    - trigger: event
-      event_type: event_template_reloaded
-  action:
-    - variables:
-        stats:
-          - climate: climate.downstairs
-            temp: sensor.downstairs_current_temperature
-            name: Downstairs
-          - climate: climate.studio_upstairs_thermostat
-            temp: sensor.studio_upstairs_thermostat_current_temperature
-            name: Upstairs
-        now_ts: "{{ as_timestamp(now()) | round(0) }}"
-        # [ts, reading, 1 if the AC was running]. Read back with state_attr:
-        # `this` isn't available in a trigger block's actions (2026-10-17
-        # review: with this.attributes the history never grew past 1).
-        samples: >-
-          {% set old = state_attr('sensor.window_heat_headroom', 'samples') %}
-          {% set ns = namespace(d={}) %}
-          {% for s in stats %}
-            {% set v = states(s.temp) %}
-            {% set keep = (old.get(s.climate, []) if old is mapping else [])
-                 | selectattr('0', 'gt', now_ts - 5700) | list %}
-            {% set cool = 1 if state_attr(s.climate, 'hvac_action') == 'cooling' else 0 %}
-            {% set keep = keep + ([[now_ts, v | float | round(2), cool]] if is_number(v) else []) %}
-            {% set ns.d = dict(ns.d, **{s.climate: keep}) %}
-          {% endfor %}
-          {{ ns.d }}
-        # complete = every thermostat in a heating mode has a usable fit;
-        # otherwise decide() gets nothing and keeps the plain cold rule
-        # (one healthy thermostat must not vouch for a blind one).
-        fit: >-
-          {% set ns = namespace(out=[], complete=true) %}
-          {% for s in stats %}
-            {% set mode = states(s.climate) %}
-            {% set sp = state_attr(s.climate, 'target_temp_low') if mode in ['heat_cool', 'auto']
-                 else (state_attr(s.climate, 'temperature') if mode == 'heat' else none) %}
-            {% set pts = samples.get(s.climate, []) | selectattr('0', 'gt', now_ts - 5400) | list %}
-            {% if mode in ['heat', 'heat_cool', 'auto'] %}
-              {% if sp is number and pts | length >= 6 and pts[-1][0] - pts[0][0] >= 2700
-                    and pts[-1][0] >= now_ts - 600 %}
-                {% set n = pts | length %}
-                {% set mt = (pts | map(attribute='0') | sum) / n %}
-                {% set mv = (pts | map(attribute='1') | sum) / n %}
-                {% set ns2 = namespace(sxy=0, sxx=0, ac=false) %}
-                {% for p in pts %}
-                  {% set ns2.sxy = ns2.sxy + (p[0] - mt) * (p[1] - mv) %}
-                  {% set ns2.sxx = ns2.sxx + (p[0] - mt) ** 2 %}
-                  {% if p | length > 2 and p[2] == 1 %}{% set ns2.ac = true %}{% endif %}
-                {% endfor %}
-                {#- AC cooling in the window isn't the house drifting toward
-                    heat (the AC stops at its own setpoint): no rate then. -#}
-                {% set rate = 0 if ns2.ac or ns2.sxx <= 0 else ns2.sxy / ns2.sxx * 3600 %}
-                {#- The fitted line at now smooths the 0.18-step readings, but
-                    never above the latest reading (a late drop counts). -#}
-                {% set temp = [mv + ns2.sxy / ns2.sxx * (now_ts - mt) if ns2.sxx > 0 else mv,
-                               pts[-1][1]] | min %}
-                {% set ns.out = ns.out + [{'name': s.name, 'temp': temp | round(2), 'set': sp,
-                     'head': (temp - sp) | round(2), 'rate': rate | round(2), 'ac': ns2.ac,
-                     'proj': (temp - sp + [rate, 0] | min) | round(2)}] %}
-              {% else %}
-                {% set ns.complete = false %}
-              {% endif %}
-            {% endif %}
-          {% endfor %}
-          {{ {'each': ns.out, 'complete': ns.complete} }}
-  sensor:
-    - unique_id: window_heat_headroom
-      name: Window Heat Headroom
-      icon: mdi:thermometer-chevron-down
-      unit_of_measurement: °F
-      # Lowest thermostat reading minus its heat setpoint, now.
-      state: >-
-        {{ (fit.each | map(attribute='head') | min) | round(1) if fit.each | length > 0 else none }}
-      attributes:
-        samples: "{{ samples }}"
-        thermostats: "{{ fit.each }}"
-        complete: "{{ fit.complete }}"
-        # The thermostat that will be closest to calling for heat in an hour.
-        decide: >-
-          {{ (fit.each | sort(attribute='proj') | first)
-             if fit.complete and fit.each | length > 0 else none }}
+# The advisor. unique_id is the old trace sensor's, so the entity keeps
+# sensor.window_advice_trace (Logic card, *_trace recorder exclude).
+- use_blueprint:
+    path: GeneralAntilles/window-advisor.yaml
+    input:
+      instance_key: home
+      outdoor_temperature: sensor.outdoor_temperature
+      outdoor_dew_point: sensor.outdoor_dewpoint
+      indoor_temperature: sensor.indoor_temperature
+      indoor_dew_point: sensor.indoor_dew_point
+      indoor_humidity: sensor.indoor_humidity
+      forecast_sensor: sensor.window_forecast
+      rain_rate: [sensor.weather_station_rain_rate]
+      rained_recently: [binary_sensor.rain_in_last_30_minutes]
+      wind_gust: [sensor.weather_station_wind_gust]
+      pm25: [sensor.airgradient_outdoor_pm2_5]
+      thermostats: [climate.downstairs, climate.studio_upstairs_thermostat]
+      thermostat_temperatures:
+        - sensor.downstairs_current_temperature
+        - sensor.studio_upstairs_thermostat_current_temperature
+  unique_id: window_advice_trace
+  name: Window Advice Trace
 
 - sensor:
+    # Recorded twin of the advisor's state (history, Home dashboard).
     - unique_id: window_advice
       name: Window Advice
       icon: mdi:window-open-variant
-      # The ladder lives in custom_templates/window_advisor.jinja (source:
-      # climate/window_advisor.jinja) so the Logic tab's trace below shows the
-      # exact same decision. Replay-checked against the previous inline
-      # template: logic-view/replay-window-advisor.py (1500 cases, 0 diffs).
-      state: >-
-        {% from 'window_advisor.jinja' import window_advice %}
-        {{ (window_advice() | from_json).state }}
+      state: "{{ states('sensor.window_advice_trace') }}"
+      availability: "{{ has_value('sensor.window_advice_trace') }}"
       attributes:
-        summary: >-
-          {% macro f(e) %}{{ (states(e) | float | round(0) | int) if is_number(states(e)) else '?' }}{% endmacro %}
-          Outside {{ f('sensor.outdoor_temperature') }}°F, dew point {{ f('sensor.outdoor_dewpoint') }}°F · inside {{ f('sensor.indoor_temperature') }}°F, dew point {{ f('sensor.indoor_dew_point') }}°F
-        # First projected point (station reading + forecast trend) that
-        # breaks the "stay open" thresholds; none = nothing in 12 hours.
-        # Both read from the trace sensor's single full decide() render
-        # (rendering it again here would double the cost per update).
-        good_until: >-
-          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
-          {{ d.good_until if d is mapping else none }}
-        # While blocked: first future hour that would pass every "open"
-        # threshold and hold for 2 h after; none = not within 12 hours.
-        opens_around: >-
-          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
-          {{ d.opens_around if d is mapping else none }}
-        # Next 2 h hold the stay-open limits (none = unknown); the "open"
-        # push requires it, since that push can also fire in stay mode.
-        outlook_ok: >-
-          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
-          {{ d.outlook_ok if d is mapping else none }}
-        forecast_through: >-
-          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
-          {{ d.forecast_through if d is mapping else none }}
-        # Would pass the strict opening limits right now (incl. the 2-h
-        # outlook). The open push needs it: after a "Crack them" episode the
-        # advice runs on the looser stay limits even with windows closed.
-        open_ok: >-
-          {% set d = state_attr('sensor.window_advice_trace', 'trace') %}
-          {{ d.open_ok if d is mapping else none }}
-
-    # Every gate of the ladder with its live value and both thresholds, for
-    # the Logic tab (logic-view/logic-trace-card.js). Recorder-excluded by
-    # the sensor.*_trace glob. State = key of the deciding gate.
-    - unique_id: window_advice_trace
-      name: Window Advice Trace
-      icon: mdi:head-cog-outline
-      state: >-
-        {% from 'window_advisor.jinja' import window_advice %}
-        {% set d = window_advice() | from_json %}
-        {{ 'blind' if d.state.startswith('Blind') else ('good' if d.decided < 0 else d.gates[d.decided].k) }}
-      attributes:
-        trace: >-
-          {% from 'window_advisor.jinja' import window_advice %}
-          {{ window_advice() | from_json }}
-        summary: "{{ state_attr('sensor.window_advice', 'summary') }}"
-        source: "{{ state_attr('sensor.window_forecast', 'source') }}"
-        hours: >-
-          {% set hours = state_attr('sensor.window_forecast', 'hours') %}
-          {{ (hours | selectattr('t', 'defined') | list)[:12] if hours is list else [] }}
+        summary: "{{ state_attr('sensor.window_advice_trace', 'summary') }}"
+        level: "{{ state_attr('sensor.window_advice_trace', 'level') }}"
+        good_until: "{{ state_attr('sensor.window_advice_trace', 'good_until') }}"
+        opens_around: "{{ state_attr('sensor.window_advice_trace', 'opens_around') }}"
+        outlook_ok: "{{ state_attr('sensor.window_advice_trace', 'outlook_ok') }}"
+        open_ok: "{{ state_attr('sensor.window_advice_trace', 'open_ok') }}"
+        forecast_through: "{{ state_attr('sensor.window_advice_trace', 'forecast_through') }}"
 
 - binary_sensor:
+    # Dashboard visibility conditions. Already debounced by the advisor.
     - unique_id: window_weather_good
       name: Window Weather Good
       icon: mdi:window-open-variant
-      # "Crack them" counts: windows may stay open (cracked); the open push
-      # separately requires the advice to be plain Good.
-      state: >-
-        {{ is_state('sensor.window_advice', 'Good')
-           or states('sensor.window_advice').startswith('Crack') }}
-      availability: >-
-        {{ has_value('sensor.window_advice')
-           and not states('sensor.window_advice').startswith('Blind') }}
-      delay_on:
-        minutes: 20
-      delay_off:
-        minutes: 10
-
-    # Immediate "close the windows" conditions, no debounce. Each input
-    # counts on its own: a dead PM sensor must not hide rain. Unavailable
-    # only when all three are missing. The reason is a category (no
-    # numbers) so it only changes when the kind of hazard changes.
-    - unique_id: window_hazard
-      name: Window Hazard
-      icon: mdi:weather-lightning-rainy
-      state: >-
-        {% set rr = states('sensor.weather_station_rain_rate') %}
-        {% set gust = states('sensor.weather_station_wind_gust') %}
-        {% set pm = states('sensor.airgradient_outdoor_pm2_5') %}
-        {{ (is_number(rr) and rr | float > 0)
-           or (is_number(gust) and gust | float >= 30)
-           or (is_number(pm) and pm | float > 35) }}
-      availability: >-
-        {{ is_number(states('sensor.weather_station_rain_rate'))
-           or is_number(states('sensor.weather_station_wind_gust'))
-           or is_number(states('sensor.airgradient_outdoor_pm2_5')) }}
-      attributes:
-        reason: >-
-          {% set rr = states('sensor.weather_station_rain_rate') %}
-          {% set gust = states('sensor.weather_station_wind_gust') %}
-          {% set pm = states('sensor.airgradient_outdoor_pm2_5') %}
-          {% if is_number(rr) and rr | float > 0 %}It's raining
-          {%- elif is_number(gust) and gust | float >= 30 %}Strong wind gusts
-          {%- elif is_number(pm) and pm | float > 35 %}Smoke or dust outside
-          {%- else %}none{% endif %}
-
-    # House too hot, too cold or too muggy for 15 min. Only acted on while
-    # Windows Open is on, as the safety net for forgotten open windows.
-    - unique_id: window_indoor_extreme
-      name: Window Indoor Extreme
-      icon: mdi:home-thermometer
-      state: >-
-        {% set it = states('sensor.indoor_temperature') | float(70) %}
-        {% set idp = states('sensor.indoor_dew_point') | float(50) %}
-        {{ it > 80 or it < 62 or idp > 62 }}
-      availability: "{{ is_number(states('sensor.indoor_temperature')) }}"
-      delay_on:
-        minutes: 15
-      attributes:
-        reason: >-
-          {% set it = states('sensor.indoor_temperature') | float(70) %}
-          {% set idp = states('sensor.indoor_dew_point') | float(50) %}
-          {% if it > 80 %}House is {{ it | round(0) | int }}°F
-          {%- elif it < 62 %}House is down to {{ it | round(0) | int }}°F
-          {%- elif idp > 62 %}Indoor dew point is {{ idp | round(0) | int }}°F
-          {%- else %}none{% endif %}
+      state: "{{ state_attr('sensor.window_advice_trace', 'good') is true }}"
+      availability: "{{ state_attr('sensor.window_advice_trace', 'good') is not none }}"
