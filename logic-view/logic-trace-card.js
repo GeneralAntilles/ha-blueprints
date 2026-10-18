@@ -809,7 +809,7 @@ class LogicTraceCard extends HTMLElement {
     const tr = trace.trend ?? {};
     const sgn = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(Math.round(v))}°`;
     const sub = corrected && isNum(tr.bias_temp)
-      ? `<p class="strip-sub">Forecast shape, anchored on the backyard station (${sgn(tr.bias_temp)} temp, ${sgn(tr.bias_dp)} dew pt vs ${esc(attrs.source === 'nbm' ? 'NBM' : attrs.source ?? 'forecast')})${
+      ? `<p class="strip-sub">Forecast shape, anchored on the outdoor sensor (${sgn(tr.bias_temp)} temp, ${sgn(tr.bias_dp)} dew pt vs ${esc(attrs.source === 'nbm' ? 'NBM' : 'the forecast')})${
         isNum(tr.temp_2h) ? ` · next 2 h: outside ${sgn(tr.temp_2h)}, dew pt ${sgn(tr.dp_2h)}` : ''}${
         trace.opens_around ? ` · could open around <b>${esc(new Date(trace.opens_around).toLocaleTimeString([], { hour: 'numeric' }))}</b>` : ''}</p>` : '';
     const last = hours[n - 1];

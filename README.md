@@ -105,6 +105,8 @@ tracks a backyard station far better than the default met.no forecast.
 draws the advisor's `trace` attribute as a ladder (every check, its live value and
 both limits, which one decided) with the next 12 hours' projection.
 
+![Logic card for the Window Advisor: twelve checks top to bottom, the first failing one highlighted, and the next hours' projected temperature and dew point](docs/window-advisor-logic-card.png)
+
 **Tests:** `climate/window_advisor.jinja` is the source of the decision; it is
 copied into the blueprint by `climate/build-window-advisor.py` (`--check` in the
 tests). `logic-view/test-window-advisor-v2.py`, `test-window-advisor-blueprint.py`
