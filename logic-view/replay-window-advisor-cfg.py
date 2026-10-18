@@ -3,7 +3,9 @@
 its defaults vs the frozen v2 macro (window-advisor-v2.jinja, live 2026-10-08),
 both rendered by HA. Random cases are clustered on every threshold, with
 moving forecast curves, rain, gaps and both modes. The only allowed difference
-is the new trend.hours key. Usage (after sourcing .env):
+are the new trend.hours, level and open_ok keys. Since 2026-10-17 the defaults differ
+from v2 (gust_stay 30), so the new side gets cfg {'gust_stay': 25}, and no
+heat input (raw.heat absent = the v2 cold rule). Usage (after sourcing .env):
     python3 logic-view/replay-window-advisor-cfg.py [N]"""
 import json, os, random, re, sys, urllib.request, pathlib, datetime as dt
 
@@ -58,6 +60,19 @@ def case():
 def strip(d):
     d = json.loads(d)
     d.get('trend', {}).pop('hours', None)
+    d.pop('level', None)
+    d.pop('open_ok', None)
+    for g in d.get('gates', []):
+        g.pop('soft', None)
+        g.pop('note', None) if g.get('k') == 'cold' else None
+    ks = [g.get('k') for g in d.get('gates', [])]
+    if 'heat' in ks:
+        # Never fails without a heat input, so it never decides; later
+        # gates shift down one.
+        hi = ks.index('heat')
+        d['gates'] = [g for g in d['gates'] if g.get('k') != 'heat']
+        if d.get('decided', -1) > hi:
+            d['decided'] -= 1
     return d
 
 
@@ -67,10 +82,11 @@ cases = [case() for _ in range(n)]
 diffs = 0
 for i in range(0, n, 20):
     chunk = cases[i:i + 20]
-    calls = ''.join(f"{{{{ decide({jlit(r)}, {jlit(h)}, {jlit(f)}, {now}, {str(s).lower()}, {str(rr).lower()}) }}}}~~SEP~~"
-                    for r, h, f, now, s, rr in chunk)
-    old = render(OLD + calls).split('~~SEP~~')
-    new = render(NEW + calls).split('~~SEP~~')
+    def calls(cfg):
+        return ''.join(f"{{{{ decide({jlit(r)}, {jlit(h)}, {jlit(f)}, {now}, {str(s).lower()}, {str(rr).lower()}{cfg}) }}}}~~SEP~~"
+                       for r, h, f, now, s, rr in chunk)
+    old = render(OLD + calls('')).split('~~SEP~~')
+    new = render(NEW + calls(", {'gust_stay': 25}")).split('~~SEP~~')
     for k, (a, b) in enumerate(zip(old, new)):
         if not a.strip():
             continue

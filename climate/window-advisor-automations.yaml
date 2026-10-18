@@ -216,7 +216,9 @@
               continue_on_error: true
 
         # ---------------- time to close -----------------------------------
-        # Only on a real "off" (blind is handled above, after 30 min).
+        # Only on a real "off" (blind is handled above, after 30 min). With
+        # the thermostats watched, cold alone is "Crack them" (good stays
+        # on), so this fires on heat headroom, not the outdoor temperature.
         # Once per bad episode, or again at 07:00 if still open and bad.
         # Quiet hours deliver silently; skipped for 45 min after a hazard
         # push, which already said "close".
@@ -249,11 +251,13 @@
         # ---------------- good time to open -------------------------------
         # Once per good episode, only while Ryan is home and awake; an
         # overnight episode is announced at 07:00. 3 h floor between pushes.
-        # Skipped while the 2-hour outlook fails (in stay mode the advice
-        # itself doesn't check it).
+        # Needs open_ok: every check passes the strict opening limits now,
+        # 2-hour outlook included. good alone isn't enough: a "Crack them"
+        # episode turns it on too and then the advice uses the looser stay
+        # limits (the 15-min check sends the push once it qualifies).
         - conditions: >-
             {{ not is_open and good and not quiet
-               and state_attr('sensor.window_advice', 'outlook_ok') is true
+               and state_attr('sensor.window_advice', 'open_ok') is true
                and is_state('person.ryan_abel', 'home')
                and advice_sent < good_since
                and (now_ts - advice_sent) > 10800 }}

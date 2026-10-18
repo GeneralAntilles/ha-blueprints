@@ -29,6 +29,7 @@ const UNITS = {
   '°F dew pt out': [(v) => `${Math.round(v)}°`, 'dew point outside'],
   '% RH in': [(v) => `${Math.round(v)}%`, 'humidity inside'],
   'BTU/lb out': [(v) => v.toFixed(1), 'BTU/lb outside (heat + moisture)'],
+  '° over heat set': [(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}°`, 'over heat setpoint in 1 h'],
   'µg/m³ rise': [(v) => `+${Math.round(v)}`, 'µg/m³ over 1-h low'],
   'min': [(v) => Math.round(v), 'minutes running'],
   'fans': [(v) => Math.round(v), 'fans owned'],
@@ -114,7 +115,7 @@ class LogicTraceCard extends HTMLElement {
     // (the first ladder) relies on these defaults.
     const kicker = trace.kicker ?? { good: 'Open the windows', blocked: 'Keep them closed', blind: "Can't tell right now" }[tone];
     const headline = trace.kicker ? trace.state : tone === 'good' ? 'Every check passes' : trace.state;
-    const icon = trace.icon ?? { good: 'mdi:window-open-variant', blocked: 'mdi:window-closed-variant', blind: 'mdi:eye-off-outline' }[tone];
+    const icon = trace.icon ?? { good: 'mdi:window-open-variant', crack: 'mdi:window-open', blocked: 'mdi:window-closed-variant', blind: 'mdi:eye-off-outline' }[tone];
     const allPass = decided < 0 && !blind;
 
     const modeText = trace.mode_text ?? (mode === 'stay'
@@ -159,7 +160,7 @@ class LogicTraceCard extends HTMLElement {
     </li>
   </ol>
 
-  <div class="side">${this._strip(a, gates, tone === 'good', trace)}${key(this._legendOpen ?? this._config.legend === 'open')}</div>
+  <div class="side">${this._strip(a, gates, tone === 'good' || tone === 'crack', trace)}${key(this._legendOpen ?? this._config.legend === 'open')}</div>
   </div>
 
   <footer>
@@ -679,10 +680,12 @@ class LogicTraceCard extends HTMLElement {
   }
 
   _row(g, i, decided, mode, attrs) {
-    const status = g.fail === true ? 's-fail' : g.fail === false ? 's-pass' : 's-na';
+    // soft: passes, but limits how far to open (window advisor "crack them").
+    const status = g.fail === true ? 's-fail' : g.soft ? 's-soft' : g.fail === false ? 's-pass' : 's-na';
     const pos = decided < 0 ? 'before' : i < decided ? 'before' : i === decided ? 'decider' : 'after';
     const badge = pos === 'decider' ? '<span class="badge">stops here</span>'
-      : pos === 'after' && g.fail ? '<span class="badge also">also blocks</span>' : '';
+      : pos === 'after' && g.fail ? '<span class="badge also">also blocks</span>'
+      : g.soft ? '<span class="badge soft">crack only</span>' : '';
     const otherMode = mode === 'open' ? 'to stay open' : 'to open';
 
     let meta;
@@ -704,7 +707,7 @@ class LogicTraceCard extends HTMLElement {
     const viz = Array.isArray(g.hours) ? this._hours(g, attrs) : this._track(g, mode);
     return `
     <li class="gate ${status} ${pos}" style="--i:${i}">
-      <span class="node">${g.fail === true ? '✕' : g.fail === false ? '✓' : '?'}</span>
+      <span class="node">${g.fail === true ? '✕' : g.soft ? '~' : g.fail === false ? '✓' : '?'}</span>
       <div class="body">
         <div class="qcell"><span class="q">${esc(g.q)}</span>${badge}</div>
         <span class="val">${fmt(g.v, g.unit)}<small>${esc(caption(g.unit))}</small></span>
@@ -856,6 +859,7 @@ const STYLE = `<style>
   --lt-pass: var(--success-color, #2e9d6a);
   --lt-fail: var(--error-color, #e0533d);
   --lt-na: var(--disabled-text-color, #9a9a9a);
+  --lt-crack: var(--warning-color, #d9921e);
   --lt-temp: #ef8a3c;
   --lt-dp: #3f8ff0;
   --lt-rain: #58a6e6;
@@ -876,6 +880,7 @@ ha-card { padding: 18px 20px 14px; position: relative; container-type: inline-si
   h1 { font-size: 27px; }
 }
 ha-card.tone-good { --lt-tone: var(--lt-pass); }
+ha-card.tone-crack { --lt-tone: var(--lt-crack); }
 ha-card.tone-blind, ha-card.tone-paused { --lt-tone: var(--lt-na); }
 /* No overflow: hidden on the card (it would clip tooltips); the tone bar
    rounds its own top corners to match the card instead. */
@@ -924,6 +929,7 @@ h1 { margin: 1px 0 0; font-size: 23px; line-height: 1.15; font-weight: 700; colo
   font-size: 12px; font-weight: 800; color: #fff; background: var(--lt-na); margin-top: 1px; }
 .s-pass .node { background: var(--lt-pass); }
 .s-fail .node { background: var(--lt-fail); }
+.s-soft .node { background: var(--lt-crack); }
 .s-na .node { background: transparent; border: 2px dashed var(--lt-na); color: var(--lt-na); }
 .terminal .node { background: transparent; border: 2px solid var(--lt-na); }
 .terminal.s-pass .node { background: var(--lt-pass); border: none; }
@@ -947,6 +953,7 @@ h1 { margin: 1px 0 0; font-size: 23px; line-height: 1.15; font-weight: 700; colo
 .badge.ok { background: transparent; color: var(--lt-pass); border: 1px solid color-mix(in srgb, var(--lt-pass) 55%, transparent); }
 .badge.mid { background: transparent; color: var(--lt-soft); border: 1px solid var(--lt-line); }
 .badge.also { background: transparent; color: var(--lt-fail); border: 1px solid color-mix(in srgb, var(--lt-fail) 55%, transparent); }
+.badge.soft { background: transparent; color: var(--lt-crack); border: 1px solid color-mix(in srgb, var(--lt-crack) 55%, transparent); }
 .meta { margin-top: 2px; font-size: 11.5px; color: var(--lt-soft); font-variant-numeric: tabular-nums; }
 .meta b { color: var(--lt-ink); font-weight: 600; }
 .meta .alt { opacity: .8; }

@@ -26,7 +26,17 @@
       opens_around first future proj hour passing every open threshold (indoor
                    and hazards held as now), dry, with the next 2 h holding (none = not within 12 h, or Good)
     Indoor values are held at their current reading in every projection.
-    Thresholds are [open, stay]; stay is looser so advice doesn't flap. -#}
+    Thresholds are [open, stay]; stay is looser so advice doesn't flap.
+
+    2026-10-17: heat headroom. raw.heat (optional mapping from
+    sensor.window_heat_headroom: head = lowest thermostat reading minus its
+    heat setpoint, proj = that an hour ahead at the measured cooling rate,
+    rate, name, temp, set) adds the "heat" gate: close when the house will
+    be within heat_stay (0.25 °F) of a heat setpoint within the hour. With it, cold
+    outside no longer closes the windows: it only downgrades Good to
+    "Crack them" (level 'crack', gate soft-fails), and the projection's
+    stay checks stop counting cold. Without it, cold works as before.
+    Top level gains level ('open' | 'crack' | 'closed' | 'blind'). -#}
 
 {%- macro r(x) -%}{{ x | round(0) | int }}{%- endmacro -%}
 
@@ -86,7 +96,7 @@
     opening cools the house, so holding today's inside temperature would be
     optimistic; 74 is where that rule ends up once the house has cooled. -#}
 {%- macro breaks_stay(t, dp, h_in, c) -%}
-  {%- if t < c.cold_stay -%}too cold
+  {%- if t < c.cold_stay and not c.cold_soft -%}too cold
   {%- elif t > c.warm_stay_floor -%}too warm
   {%- elif dp > c.dp_stay -%}too humid
   {%- elif enth(t, dp) | float > h_in + c.enth_margin -%}muggier than inside
@@ -97,8 +107,8 @@
 {%- set DEFAULTS = {'warm_open_margin': 2, 'warm_stay_margin': 1, 'warm_stay_floor': 74,
      'cold_open': 55, 'cold_stay': 52, 'house_open': 68, 'house_stay': 66,
      'dp_open': 58, 'dp_stay': 60, 'enth_margin': 0.5, 'rh_open': 60, 'rh_stay': 65,
-     'pm_open': 20, 'pm_stay': 35, 'gust': 25, 'rain_win_open': 3, 'rain_win_stay': 2,
-     'outlook_h': 2} -%}
+     'pm_open': 20, 'pm_stay': 35, 'gust': 25, 'gust_stay': 30, 'rain_win_open': 3, 'rain_win_stay': 2,
+     'outlook_h': 2, 'heat_open': 2, 'heat_stay': 0.25} -%}
 
 {%- macro decide(raw, hours, fetched, now_ts, stay, raining_recently, cfg={}) -%}
   {%- set c = dict(DEFAULTS, **(cfg if cfg is mapping else {})) -%}
@@ -113,7 +123,12 @@
     {%- set hours = ns_h.h -%}
   {%- endif -%}
   {%- set age_min = ((now_ts - fetched_ts) / 60) if fetched_ts is number else 9999 -%}
-  {%- set missing = raw.items() | rejectattr('1', 'is_number') | map(attribute='0') | list -%}
+  {%- set missing = raw.items() | rejectattr('0', 'eq', 'heat')
+       | rejectattr('1', 'is_number') | map(attribute='0') | list -%}
+  {#- Heat headroom is optional: absent or unknown means the old cold rule. -#}
+  {%- set heat = raw.heat if raw.heat is defined and raw.heat is mapping
+       and raw.heat.get('head') is number and raw.heat.get('proj') is number else none -%}
+  {%- set c = dict(c, cold_soft=heat is not none) -%}
   {%- set stale = hours is not list or hours | length < 3 or age_min > 90 -%}
   {%- set i = 1 if stay else 0 -%}
   {%- set win = [c.rain_win_open, c.rain_win_stay][i] -%}
@@ -144,6 +159,8 @@
   {%- set have = namespace(ot=ot is number, odp=odp is number, it=it is number,
                            idp=idp is number, irh=irh is number, pm=pm is number,
                            rr=rr is number, gust=gust is number) -%}
+  {%- set gust_t = [c.gust, c.gust_stay][i] -%}
+  {%- set heat_t = [c.heat_open, c.heat_stay] -%}
   {%- set warm_t = [it - c.warm_open_margin, [it + c.warm_stay_margin, c.warm_stay_floor] | max] if have.it else [none, none] -%}
   {%- set h_out = enth(ot, odp) | float if have.ot and have.odp else none -%}
   {%- set h_in = enth(it, idp) | float if have.it and have.idp else none -%}
@@ -218,8 +235,8 @@
      'lo': 0, 'hi': 0.3, 'extra': 'rained in last 30 min' if raining_recently else none,
      'fail': ((rr > 0) or raining_recently) if have.rr else (true if raining_recently else none),
      'reason': 'Raining'},
-    {'k': 'gust', 'short': 'Too gusty', 'q': 'Calm enough', 'unit': 'mph', 'v': gust, 't': c.gust, 't_alt': c.gust, 'cmp': '>=',
-     'lo': 0, 'hi': 40, 'fail': (gust >= c.gust) if have.gust else none,
+    {'k': 'gust', 'short': 'Too gusty', 'q': 'Calm enough', 'unit': 'mph', 'v': gust, 't': gust_t, 't_alt': [c.gust, c.gust_stay][1 - i], 'cmp': '>=',
+     'lo': 0, 'hi': 40, 'fail': (gust >= gust_t) if have.gust else none,
      'reason': 'Too gusty (' ~ r(gust) ~ ' mph gusts)' if have.gust else ''},
     {'k': 'pm', 'short': 'Smoky or dusty', 'q': 'Clean air outside', 'unit': 'µg/m³ PM2.5', 'v': pm, 't': [c.pm_open, c.pm_stay][i], 't_alt': [c.pm_open, c.pm_stay][1 - i],
      'cmp': '>', 'lo': 0, 'hi': 60, 'fail': (pm > [c.pm_open, c.pm_stay][i]) if have.pm else none,
@@ -234,11 +251,24 @@
      'fail': (ot > warm_t[i]) if have.ot and have.it else none,
      'reason': "Outside (" ~ r(ot) ~ "°F) isn't cooler than inside (" ~ r(it) ~ "°F)" if have.ot and have.it else ''},
     {'k': 'cold', 'short': 'Too cold outside', 'q': 'Not too cold', 'unit': '°F out', 'v': ot, 't': [c.cold_open, c.cold_stay][i], 't_alt': [c.cold_open, c.cold_stay][1 - i],
-     'cmp': '<', 'lo': 40, 'hi': 100, 'fail': (ot < [c.cold_open, c.cold_stay][i]) if have.ot else none,
+     'cmp': '<', 'lo': 40, 'hi': 100,
+     'fail': (false if heat is not none else ot < [c.cold_open, c.cold_stay][i]) if have.ot else none,
+     'soft': heat is not none and have.ot and ot < [c.cold_open, c.cold_stay][i],
+     'note': 'below this: crack them, the heat check decides closing' if heat is not none else none,
      'reason': 'Too cold outside (' ~ r(ot) ~ '°F)' if have.ot else ''},
     {'k': 'house', 'short': 'House already cool', 'q': 'House needs cooling', 'unit': '°F in', 'v': it, 't': [c.house_open, c.house_stay][i], 't_alt': [c.house_open, c.house_stay][1 - i],
      'cmp': '<', 'lo': 55, 'hi': 85, 'fail': (it < [c.house_open, c.house_stay][i]) if have.it else none,
      'reason': 'House is already cool (' ~ r(it) ~ '°F)' if have.it else ''},
+    {'k': 'heat', 'short': 'Heat would kick in', 'q': 'Heat stays off', 'unit': '° over heat set',
+     'v': heat.proj | round(1) if heat else none, 't': heat_t[i] if heat else none, 't_alt': heat_t[1 - i] if heat else none,
+     'cmp': '<', 'lo': -1, 'hi': 6, 'vs': heat.head | round(1) if heat else none, 'vs_label': 'now',
+     'note': none if heat else 'no thermostat in a heating mode',
+     'extra': (('in 1 h at ' ~ ('%+.1f' | format(heat.rate | float(0))) ~ '°/h'
+               ~ (' · ' ~ heat.name if heat.name is defined and heat.name else ''))) if heat else none,
+     'fail': (heat.proj < heat_t[i]) if heat else false,
+     'reason': ('Heat would kick in soon (' ~ heat.name ~ ' ' ~ ('%.1f' | format(heat.temp | float(0)))
+               ~ '°, set to ' ~ r(heat.set | float(0)) ~ '°)') if heat and heat.name is defined
+               and heat.temp is defined and heat.set is defined else 'Heat would kick in soon'},
     {'k': 'humid', 'short': 'Too humid outside', 'q': 'Dry enough outside', 'unit': '°F dew pt out', 'v': odp, 't': [c.dp_open, c.dp_stay][i], 't_alt': [c.dp_open, c.dp_stay][1 - i],
      'cmp': '>', 'lo': 30, 'hi': 80, 'fail': (odp > [c.dp_open, c.dp_stay][i]) if have.odp else none,
      'reason': 'Too humid outside (dew point ' ~ r(odp) ~ '°F)' if have.odp else ''},
@@ -279,9 +309,13 @@
     {%- set first.i = -1 -%}
   {%- elif first.i >= 0 -%}
     {%- set state = gates[first.i].reason -%}
+  {%- elif gates | selectattr('soft', 'defined') | selectattr('soft') | list | length > 0 -%}
+    {%- set state = 'Crack them: cool outside (' ~ r(ot) ~ '°F)' -%}
   {%- else -%}
     {%- set state = 'Good' -%}
   {%- endif -%}
+  {%- set level = 'blind' if state.startswith('Blind') else ('closed' if first.i >= 0
+       else ('crack' if state.startswith('Crack') else 'open')) -%}
   {#- good_until: while Good, the earliest of the first future projected
       hour that breaks the stay thresholds and the first wet interval
       starting after now. Never the synthetic "now" point, so it's an hour
@@ -304,7 +338,8 @@
   {%- set hazard_now = gates[:3] | selectattr('fail') | list | length > 0 -%}
   {%- if state != 'Good' and not state.startswith('Blind') and not hazard_now
         and have.it and have.irh and have.pm and h_in is number
-        and it >= c.house_open and irh <= c.rh_open and pm <= c.pm_open -%}
+        and it >= c.house_open and irh <= c.rh_open and pm <= c.pm_open
+        and (heat is none or heat.proj >= c.heat_open) -%}
     {%- set fut = proj[1:] -%}
     {%- for q in fut -%}
       {%- set k = loop.index0 -%}
@@ -320,12 +355,25 @@
       {%- endif -%}
     {%- endfor -%}
   {%- endif -%}
-  {{- {'state': state, 'mode': ['open', 'stay'][i], 'decided': first.i,
+  {#- open_ok: every check passes the strict opening limits right now (any
+      mode), so the open push can't ride on stay hysteresis after a "Crack
+      them" episode left window_weather_good on. -#}
+  {%- set fo = rain_in(rain, now_ts, now_ts + 3600 * c.rain_win_open) | from_json -%}
+  {%- set open_ok = level != 'blind' and not gates[0].fail
+       and have.gust and gust < c.gust and have.pm and pm <= c.pm_open
+       and fo.known > 0 and fo.wet == 0
+       and ot <= warm_t[0] and ot >= c.cold_open and it >= c.house_open
+       and (heat is none or heat.proj >= c.heat_open)
+       and odp <= c.dp_open and h_out <= enth_t[0] and have.irh and irh <= c.rh_open
+       and ns_o.ok and ns_o.why == '' -%}
+  {%- set crack = {'tone': 'crack', 'kicker': 'Keep them cracked',
+       'terminal': 'Clear, but cool outside → “crack them”'} if level == 'crack' else {} -%}
+  {{- dict(crack, **{'state': state, 'level': level, 'mode': ['open', 'stay'][i], 'decided': first.i,
        'forecast_age_min': age_min | round(0) | int, 'gates': gates,
        'proj': proj, 'trend': trend, 'indoor': {'temp': it, 'dp': idp}, 'good_until': ns_u.t,
        'outlook_ok': (ns_o.why == '') if ns_o.ok and (ns_o.why != '' or ow.known == ow.n) else none,
        'forecast_through': proj[-1].t if proj | length > 1 else none,
-       'opens_around': ns_a.t} | to_json -}}
+       'opens_around': ns_a.t, 'open_ok': open_ok}) | to_json -}}
 {%- endmacro -%}
 
 {#- Gathers the live inputs and decides. Entity tracking still works: the
@@ -339,7 +387,8 @@
        'irh': states('sensor.indoor_humidity'),
        'pm': states('sensor.airgradient_outdoor_pm2_5'),
        'rr': states('sensor.weather_station_rain_rate'),
-       'gust': states('sensor.weather_station_wind_gust') } -%}
+       'gust': states('sensor.weather_station_wind_gust'),
+       'heat': state_attr('sensor.window_heat_headroom', 'decide') } -%}
   {{- decide(raw, state_attr('sensor.window_forecast', 'hours'),
              state_attr('sensor.window_forecast', 'fetched_at'), as_timestamp(now()),
              is_state('binary_sensor.window_weather_good', 'on'),

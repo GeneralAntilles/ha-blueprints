@@ -3,7 +3,8 @@
 climate/window_advisor.jinja rendered by HA itself via /api/template, with
 synthetic station readings and forecast hours. Covers the enthalpy gate, the
 58/60 dew point cap, the bias-corrected projection, the outlook gate,
-good_until and opens_around. Usage (after sourcing .env):
+good_until and opens_around; since 2026-10-17 the heat headroom gate, the
+"crack them" level and the 25/30 mph gust limits. Usage (after sourcing .env):
     python3 logic-view/test-window-advisor-v2.py"""
 import json, math, os, re, sys, urllib.request, pathlib, datetime as dt
 
@@ -51,7 +52,7 @@ FLAT = hours([64] * 12, [52] * 12)
 
 
 def decide(raw=None, hrs=None, stay=False, now=NOW, rr_recent=False):
-    raw = {k: str(v) for k, v in (raw or BASE).items()}
+    raw = {k: (v if isinstance(v, dict) or v is None else str(v)) for k, v in (raw or BASE).items()}
     hrs = FLAT if hrs is None else hrs
     fetched = dt.datetime.fromtimestamp(now - 600, dt.timezone.utc).isoformat()
     tpl = SRC + (f"{{{{ decide({jlit(raw)}, {jlit(hrs)}, {jlit(fetched)}, {now}, "
@@ -236,6 +237,45 @@ check('forecast ending before now+2h -> Blind', dd['state'] == 'Blind: forecast 
 dd = decide(None, hours([64] * 4, [52] * 4))
 check('forecast reaching now+2h is enough', dd['state'] == 'Good', dd['state'])
 
+# --- heat headroom, "crack them", gust stay limit (2026-10-17) ----------------
+COOL = hours([52] * 12, [45] * 12)
+COLD = {**BASE, 'ot': 52, 'odp': 45}
+def heat(head, proj, rate=-0.3):
+    return {'head': head, 'proj': proj, 'rate': rate, 'name': 'Downstairs', 'temp': 68 + head, 'set': 68}
+dd = decide(COLD, COOL)
+check('no heat input: cold still closes (old rule)', dd['state'] == 'Too cold outside (52°F)' and dd['level'] == 'closed', dd['state'])
+check('no heat input: heat gate passes with a note', gate(dd, 'heat')['fail'] is False and gate(dd, 'heat')['t'] is None, gate(dd, 'heat'))
+dd = decide({**COLD, 'heat': None}, COOL)
+check('heat key none is not Blind', not dd['state'].startswith('Blind'), dd['state'])
+dd = decide({**COLD, 'heat': {'head': 2}}, COOL)
+check('heat without proj = old rule', dd['state'] == 'Too cold outside (52°F)', dd['state'])
+dd = decide({**COLD, 'heat': heat(3, 2.7)}, COOL)
+check('cold + headroom: crack them (open mode)', dd['state'] == 'Crack them: cool outside (52°F)' and dd['level'] == 'crack'
+      and dd['decided'] == -1 and dd['tone'] == 'crack', (dd['state'], dd['level'], dd['decided']))
+check('cold gate soft-fails, not fails', gate(dd, 'cold')['fail'] is False and gate(dd, 'cold')['soft'] is True, gate(dd, 'cold'))
+dd = decide({**COLD, 'ot': 51, 'heat': heat(1.3, 1.0)}, COOL, stay=True)
+check('stay: proj 1.0 >= 0.25 keeps them cracked', dd['level'] == 'crack', dd['state'])
+dd = decide({**COLD, 'heat': heat(0.8, 0.2)}, COOL, stay=True)
+check('stay: proj 0.2 < 0.25 closes on heat', dd['state'] == 'Heat would kick in soon (Downstairs 68.8°, set to 68°)'
+      and dd['level'] == 'closed' and dd['decided'] == [g['k'] for g in dd['gates']].index('heat'), dd['state'])
+dd = decide({**COLD, 'heat': heat(1.8, 1.5)}, COOL)
+check('open: proj 1.5 < 2 keeps them closed', dd['state'].startswith('Heat would kick in') and dd['opens_around'] is None, dd['state'])
+dd = decide({**BASE, 'heat': heat(0.6, 0.1)}, stay=True)
+check('heat closes even when it is mild outside', dd['state'].startswith('Heat would kick in'), dd['state'])
+dd = decide({**BASE, 'heat': heat(6, 6)})
+check('mild + headroom = plain Good', dd['state'] == 'Good' and dd['level'] == 'open' and 'tone' not in dd, dd['state'])
+FALL = hours([64, 62, 60, 58, 54, 50, 48, 47, 46, 46, 46, 46], [50] * 12)
+dd = decide({**BASE, 'odp': 50}, FALL, stay=True)
+check('no heat: good_until = when it gets cold', dd['good_until'] is not None, dd['good_until'])
+dd = decide({**BASE, 'odp': 50, 'heat': heat(5, 5)}, FALL, stay=True)
+check('with heat: cold ahead no longer ends good_until', dd['good_until'] is None, dd['good_until'])
+dd = decide({**BASE, 'gust': 27}, stay=True)
+check('stay: 27 mph gusts tolerated', dd['state'] == 'Good', dd['state'])
+dd = decide({**BASE, 'gust': 27})
+check('open: 27 mph gusts block', dd['state'] == 'Too gusty (27 mph gusts)', dd['state'])
+dd = decide({**BASE, 'gust': 30}, stay=True)
+check('stay: 30 mph gusts close', dd['state'] == 'Too gusty (30 mph gusts)' and gate(dd, 'gust')['t'] == 30, dd['state'])
+
 # --- sensor.window_forecast parsing (variables block rendered in HA) --------
 import yaml
 blk = yaml.safe_load((ROOT / 'climate' / 'window-advisor-templates.yaml').read_text())[0]['action'][2]['variables']
@@ -251,6 +291,45 @@ out = render(f"{{% set nbm_hours = [] %}}{{% set fc = {jlit(fc)} %}}{blk['met_ho
 check('met.no fallback skips malformed hours, keeps missing precip as none', out.count("'t'") == 2 and "'precip': None" in out, out)
 out = render(f"{{% set nbm_hours = [] %}}{{% set fc = {jlit({'weather.forecast_home': {}})} %}}{blk['met_hours']}")
 check('met.no response without forecast list -> empty', out.strip() == '[]', out)
+
+# --- sensor.window_heat_headroom (live thermostat modes/setpoints, synthetic samples)
+heat_blk = [b for b in yaml.safe_load((ROOT / 'climate' / 'window-advisor-templates.yaml').read_text())
+            if isinstance(b, dict) and 'trigger' in b and 'window_heat_headroom' in str(b)][0]
+hv = heat_blk['action'][0]['variables']
+STATS = hv['stats']
+now_s = round(dt.datetime.now().timestamp())
+import ast
+def fit(per_climate):
+    tpl = (f"{{% set stats = {jlit(STATS)} %}}{{% set now_ts = {now_s} %}}"
+           f"{{% set samples = {jlit(per_climate)} %}}{hv['fit']}")
+    return ast.literal_eval(render(tpl).strip())
+line = [[now_s - 300 * k, round(70 - 0.6 * (18 - k) * 300 / 3600, 2), 0] for k in range(18, -1, -1)]
+heating = [s_['climate'] for s_ in STATS]
+f = fit({c_: line for c_ in heating})
+check('headroom: least-squares rate from samples', f['complete'] and f['each'] and all(abs(e['rate'] + 0.6) < 0.02 for e in f['each']), f)
+check('headroom: proj = head + rate·1h', all(abs(e['proj'] - (e['head'] + e['rate'])) < 0.02 for e in f['each']), f)
+f = fit({c_: line[-3:] for c_ in heating})
+check('headroom: < 45 min of samples -> incomplete', not f['complete'] and f['each'] == [], f)
+f = fit({heating[0]: line})
+check('headroom: one thermostat without samples -> incomplete', not f['complete'] and len(f['each']) == 1, f)
+ac = [[t_, v_, 1 if k_ == 5 else 0] for k_, (t_, v_, _) in enumerate(line)]
+f = fit({c_: ac for c_ in heating})
+check('headroom: AC ran in the window -> rate 0', all(e['rate'] == 0 and e['ac'] for e in f['each']), f)
+drop = [[now_s - 300 * k, 70.0 if k > 1 else 68.0, 0] for k in range(17, -1, -1)]
+f = fit({c_: drop for c_ in heating})
+check('headroom: reading never above the latest sample', all(e['temp'] == 68.0 for e in f['each']), f)
+old2 = [[t_, v_] for t_, v_, _ in line]
+f = fit({c_: old2 for c_ in heating})
+check('headroom: 2-element samples from before the AC flag still fit', f['complete'], f)
+# open_ok: strict opening limits, any mode
+dd = decide({**BASE, 'gust': 27, 'heat': heat(6, 6)}, stay=True)
+check('open_ok false on 27 mph gusts in stay mode (state Good)', dd['state'] == 'Good' and dd['open_ok'] is False, (dd['state'], dd['open_ok']))
+dd = decide({**COLD, 'ot': 53, 'heat': heat(1, 1)}, hours([53] * 12, [45] * 12), stay=True)
+check('open_ok false: 53 °F and heat proj 1 in stay mode', dd['open_ok'] is False, (dd['state'], dd['open_ok']))
+dd = decide()
+check('open_ok true on the baseline', dd['open_ok'] is True, dd['open_ok'])
+dd = decide(BASE, hours([64, 72, 80, 84] + [84] * 8, [52] * 12))
+check('open_ok false when the outlook fails', dd['open_ok'] is False, (dd['state'], dd['open_ok']))
 
 print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
 sys.exit(1 if fails else 0)
